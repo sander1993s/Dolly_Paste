@@ -4,6 +4,8 @@ Dolly Paste is a lightweight, fully local Windows clipboard manager built with a
 
 Licensed under the [MIT License](LICENSE).
 
+Website: [Smet Software Solutions](https://smetsoftwaresolutions.be).
+
 ---
 
 ## Key Features
