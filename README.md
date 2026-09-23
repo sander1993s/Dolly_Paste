@@ -6,6 +6,8 @@ Licensed under the [MIT License](LICENSE).
 
 Website: [Smet Software Solutions](https://smetsoftwaresolutions.be).
 
+Trusted code signing is being prepared. No SignPath Foundation application has been submitted or approved yet. See the [proposed signing policy and setup](CODE_SIGNING.md); existing downloads are not changed by this preparation.
+
 ---
 
 ## Key Features
