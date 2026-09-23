@@ -1,0 +1,107 @@
+name: Prepare signed Windows download
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: dolly-paste-signing
+  cancel-in-progress: false
+
+jobs:
+  sign-and-package:
+    if: github.repository == 'sander1993s/Dolly_Paste' && github.ref == 'refs/heads/main' && github.actor == 'sander1993s' && github.triggering_actor == 'sander1993s'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # Configure required reviewer sander1993s and restrict this environment to main.
+    environment: release-signing
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Require approved signing configuration
+        env:
+          SIGNPATH_ENABLED: ${{ vars.SIGNPATH_ENABLED }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          SIGNPATH_EXPECTED_SIGNER_SUBJECT: ${{ vars.SIGNPATH_EXPECTED_SIGNER_SUBJECT }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:SIGNPATH_ENABLED -cne 'true') {
+            throw 'Signing is not enabled. Complete the approved setup in CODE_SIGNING.md first.'
+          }
+          foreach ($name in @('SIGNPATH_ORGANIZATION_ID', 'SIGNPATH_PROJECT_SLUG', 'SIGNPATH_SIGNING_POLICY_SLUG', 'SIGNPATH_ARTIFACT_CONFIGURATION_SLUG', 'SIGNPATH_EXPECTED_SIGNER_SUBJECT', 'SIGNPATH_API_TOKEN')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing required signing configuration: $name"
+            }
+          }
+
+      - name: Build
+        run: .\build.ps1
+
+      - name: Run regression suites
+        run: .\tests\run-tests.ps1
+
+      - name: Read release version
+        id: version
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [xml]$manifest = Get-Content -LiteralPath app.manifest -Raw
+          $version = $manifest.assembly.assemblyIdentity.version
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Invalid manifest version.' }
+          $metadata = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path -LiteralPath 'dist\Dolly Paste.exe').Path)
+          if ($metadata.FileVersion -ne $version -or $metadata.ProductVersion -ne $version) {
+            throw 'Assembly versions must match app.manifest.'
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # SignPath requires this CI transport artifact to verify build provenance.
+      # It is unsigned and must never be distributed as a release.
+      - name: Upload unsigned signing input (not for distribution)
+        id: unsigned
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: UNSIGNED-signing-input-NOT-FOR-DISTRIBUTION
+          path: dist/Dolly Paste.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Request signing and wait for manual approval
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: dist/signed
+          parameters: |
+            version: ${{ toJSON(steps.version.outputs.version) }}
+
+      - name: Verify signature and prepare website ZIP
+        env:
+          EXPECTED_SIGNER_SUBJECT: ${{ vars.SIGNPATH_EXPECTED_SIGNER_SUBJECT }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: .\scripts\New-SignedPackage.ps1 -ExpectedSignerSubject $env:EXPECTED_SIGNER_SUBJECT -SourceRevision $env:SOURCE_REVISION
+
+      - name: Upload verified website ZIP
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: Dolly-Paste-Windows-signed-${{ steps.version.outputs.version }}
+          path: dist/release/dolly-paste-windows.zip
+          if-no-files-found: error
+          retention-days: 30
