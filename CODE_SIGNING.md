@@ -1,6 +1,6 @@
 # Code signing setup and proposed policy
 
-Status: preparation only. No application to the SignPath Foundation has been submitted or approved, and no trusted signing certificate has been provisioned. The workflow does not make existing downloads signed. Acceptance into the free program is decided by the Foundation; this repository makes no claim of sponsorship or endorsement.
+Status: preparation only. SignPath Foundation onboarding is pending, and no trusted signing certificate has been configured for this integration. The workflow does not make existing downloads signed. Acceptance into the free program is decided by the Foundation; this repository makes no claim of sponsorship or endorsement.
 
 The proposed provider is the [SignPath Foundation](https://signpath.org/), which offers free code signing to accepted open-source projects. Dolly Paste is published under the [MIT License](LICENSE). Its source and build scripts are public; it uses only the Windows .NET Framework runtime. GitHub-hosted Windows runners build from the checked-out source and run the existing test suites before requesting a signature.
 
