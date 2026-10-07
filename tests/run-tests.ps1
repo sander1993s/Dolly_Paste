@@ -101,11 +101,12 @@ try {
     }
 
     $coreExe = Join-Path $tempDirFull "CoreTests.exe"
+    $imageSrcFile = Join-Path $srcDir "ImagePayload.cs"
     $coreArgs = @(
         "/nologo",
         "/target:exe",
         "/out:$coreExe"
-    ) + $commonRefs + @($coreSrcFile, $coreTestFile)
+    ) + $commonRefs + @($coreSrcFile, $imageSrcFile, $coreTestFile)
 
     Write-Host "Compiling CoreTests..." -ForegroundColor Gray
     & $csc @coreArgs
@@ -142,7 +143,7 @@ try {
         "/nologo",
         "/target:exe",
         "/out:$platformExe"
-    ) + $commonRefs + @($coreSrcFile, $clipSrcFile, $platformTestFile)
+    ) + $commonRefs + @($coreSrcFile, $imageSrcFile, $clipSrcFile, $platformTestFile)
 
     Write-Host "Compiling PlatformTests..." -ForegroundColor Gray
     & $csc @platformArgs

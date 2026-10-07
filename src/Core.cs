@@ -361,6 +361,18 @@ namespace DollyPaste
                 return null;
             }
 
+            return CapturePayload(text, sequence, DetermineKind(text));
+        }
+
+        public ClipEntry CaptureImage(string pngBase64, uint sequence)
+        {
+            if (!ImagePayload.IsValidBase64(pngBase64)) return null;
+            return CapturePayload(pngBase64, sequence, "IMAGE");
+        }
+
+        private ClipEntry CapturePayload(string text, uint sequence, string kind)
+        {
+
             ClipEntry result = null;
             bool stateChanged = false;
 
@@ -399,7 +411,7 @@ namespace DollyPaste
                                 now,
                                 false,
                                 true,
-                                DetermineKind(text)
+                                kind
                             );
                             _entries.Insert(0, tombstone);
                             stateChanged = true;
@@ -432,7 +444,8 @@ namespace DollyPaste
                         int existingIndex = -1;
                         for (int i = 0; i < _entries.Count; i++)
                         {
-                            if (!_entries[i].IsSensitive && string.Equals(_entries[i].Text, text, StringComparison.Ordinal))
+                            if (!_entries[i].IsSensitive && _entries[i].Kind == kind &&
+                                string.Equals(_entries[i].Text, text, StringComparison.Ordinal))
                             {
                                 existingIndex = i;
                                 break;
@@ -456,7 +469,7 @@ namespace DollyPaste
                                 now,
                                 false,
                                 false,
-                                DetermineKind(text)
+                                kind
                             );
                             _entries.Insert(0, newEntry);
                             stateChanged = true;
@@ -1082,13 +1095,14 @@ namespace DollyPaste
                             {
                                 text = string.Empty;
                             }
-                            else if (text == null || text.Length > MaxTextChars)
+                            else if (r.Kind == "IMAGE" ? !ImagePayload.IsValidBase64(text) :
+                                (text == null || text.Length > MaxTextChars))
                             {
                                 continue;
                             }
 
                             string kind = r.Kind;
-                            if (kind != "TEXT" && kind != "LINK" && kind != "CODE")
+                            if (kind != "TEXT" && kind != "LINK" && kind != "CODE" && kind != "IMAGE")
                             {
                                 kind = DetermineKind(text);
                             }

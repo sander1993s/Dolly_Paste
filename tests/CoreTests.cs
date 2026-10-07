@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -24,6 +27,13 @@ namespace DollyPaste.Tests
             RunTest("Test_SettingsStore_EmptyAndPartialJson_PreserveDefaults", Test_SettingsStore_EmptyAndPartialJson_PreserveDefaults);
             RunTest("Test_Capture_BasicAndKindDetection", Test_Capture_BasicAndKindDetection);
             RunTest("Test_Capture_IgnoreEmptyAndOversized", Test_Capture_IgnoreEmptyAndOversized);
+            RunTest("Test_ImagePayload_PngRoundtripAndThumbnails", Test_ImagePayload_PngRoundtripAndThumbnails);
+            RunTest("Test_ImagePayload_RejectsInvalidAndOversizedInput", Test_ImagePayload_RejectsInvalidAndOversizedInput);
+            RunTest("Test_ImageCapture_LargePayloadDeduplicationAndExpiry", Test_ImageCapture_LargePayloadDeduplicationAndExpiry);
+            RunTest("Test_ImageCapture_ProtectionScrubsPayload", Test_ImageCapture_ProtectionScrubsPayload);
+            RunTest("Test_ImageCapture_PayloadRetentionCap", Test_ImageCapture_PayloadRetentionCap);
+            RunTest("Test_ImagePersistence_EncryptedMixedHistoryRoundtrip", Test_ImagePersistence_EncryptedMixedHistoryRoundtrip);
+            RunTest("Test_ImagePersistence_RejectsInvalidImagesAndKeepsLegacyText", Test_ImagePersistence_RejectsInvalidImagesAndKeepsLegacyText);
             RunTest("Test_Deduplication_PreservesOriginalCaptureAge", Test_Deduplication_PreservesOriginalCaptureAge);
             RunTest("Test_ExpiryBoundary_ExactBoundaryIncludingPins", Test_ExpiryBoundary_ExactBoundaryIncludingPins);
             RunTest("Test_ProtectExisting_CensorAndDiscardModes", Test_ProtectExisting_CensorAndDiscardModes);
@@ -294,6 +304,308 @@ namespace DollyPaste.Tests
             {
                 CleanupDir(tempDir);
             }
+        }
+
+        private static void Test_ImagePayload_PngRoundtripAndThumbnails()
+        {
+            string payload;
+            Color translucent = Color.FromArgb(96, 40, 120, 200);
+            using (Bitmap source = new Bitmap(120, 60, PixelFormat.Format32bppArgb))
+            {
+                source.SetPixel(0, 0, translucent);
+                source.SetPixel(119, 59, Color.Crimson);
+                payload = ImagePayload.EncodePng(source);
+            }
+
+            Assert(!string.IsNullOrEmpty(payload), "PNG encoder returns base64 after source disposal");
+            Assert(ImagePayload.IsValidBase64(payload), "Encoded PNG validates");
+            Assert(!payload.StartsWith("data:"), "Stored value is raw base64");
+            byte[] png = Convert.FromBase64String(payload);
+            AssertEqual((byte)137, png[0], "Encoded bytes start with PNG signature");
+            AssertEqual(payload, ImagePayload.FromPngBytes(png), "PNG bytes preserve exact base64 value");
+
+            using (Bitmap decoded = ImagePayload.Decode(payload))
+            {
+                Assert(decoded != null, "Decode returns a caller-owned image");
+                AssertEqual(120, decoded.Width, "Decoded width");
+                AssertEqual(60, decoded.Height, "Decoded height");
+                AssertEqual(translucent.ToArgb(), decoded.GetPixel(0, 0).ToArgb(), "PNG roundtrip preserves alpha and color");
+                AssertEqual(Color.Crimson.ToArgb(), decoded.GetPixel(119, 59).ToArgb(), "Decoded bitmap remains readable");
+            }
+
+            using (Bitmap thumbnail = ImagePayload.CreateThumbnail(payload, new Size(40, 40)))
+            {
+                Assert(thumbnail != null, "Thumbnail can be created after decoded bitmap disposal");
+                AssertEqual(40, thumbnail.Width, "Wide image thumbnail fits target width");
+                AssertEqual(20, thumbnail.Height, "Wide image thumbnail preserves aspect ratio");
+            }
+
+            using (Bitmap tall = new Bitmap(30, 90))
+            using (Bitmap thumbnail = ImagePayload.CreateThumbnail(ImagePayload.EncodePng(tall), new Size(40, 40)))
+            {
+                Assert(thumbnail != null, "Tall image thumbnail exists");
+                AssertEqual(40, thumbnail.Height, "Tall image thumbnail fits target height");
+                Assert(Math.Abs(thumbnail.Width - 40.0 / 3.0) <= 1.0, "Tall image thumbnail preserves aspect ratio within pixel rounding");
+            }
+        }
+
+        private static void Test_ImagePayload_RejectsInvalidAndOversizedInput()
+        {
+            Assert(ImagePayload.EncodePng(null) == null, "Null image ignored");
+            Assert(ImagePayload.FromPngBytes(null) == null, "Null PNG ignored");
+            Assert(ImagePayload.FromPngBytes(new byte[0]) == null, "Empty PNG ignored");
+            Assert(ImagePayload.Decode(null) == null, "Null base64 ignored");
+            Assert(ImagePayload.Decode("not base64!") == null, "Malformed base64 ignored");
+            Assert(!ImagePayload.IsValidBase64(Convert.ToBase64String(Encoding.UTF8.GetBytes("not an image"))), "Base64 text is not a valid PNG");
+            Assert(ImagePayload.Decode(new string('A', ImagePayload.MaxBase64Chars + 4)) == null, "Oversized base64 rejected without decoding");
+            Assert(ImagePayload.FromPngBytes(new byte[ImagePayload.MaxPngBytes + 1]) == null, "Oversized PNG bytes rejected");
+
+            string valid = CreateNoiseImageBase64(16, 16, 10);
+            byte[] png = Convert.FromBase64String(valid);
+            byte[] truncated = new byte[24];
+            Array.Copy(png, truncated, truncated.Length);
+            Assert(ImagePayload.FromPngBytes(truncated) == null, "Truncated PNG header rejected");
+            byte[] corruptBody = (byte[])png.Clone();
+            Array.Clear(corruptBody, 33, corruptBody.Length - 33);
+            Assert(ImagePayload.FromPngBytes(corruptBody) == null, "Corrupt PNG body with valid header rejected without throwing");
+            Assert(ImagePayload.CreateThumbnail("invalid", new Size(40, 40)) == null, "Invalid thumbnail payload rejected");
+
+            byte[] excessiveWidth = (byte[])png.Clone();
+            SetPngHeaderDimensions(excessiveWidth, ImagePayload.MaxDimension + 1, 1);
+            Assert(ImagePayload.FromPngBytes(excessiveWidth) == null, "PNG dimensions above limit rejected");
+            Assert(ImagePayload.Decode(Convert.ToBase64String(excessiveWidth)) == null, "Decode also rejects enormous PNG dimensions");
+
+            byte[] excessivePixels = (byte[])png.Clone();
+            SetPngHeaderDimensions(excessivePixels, ImagePayload.MaxDimension, ImagePayload.MaxPixelCount / ImagePayload.MaxDimension + 1);
+            Assert(ImagePayload.FromPngBytes(excessivePixels) == null, "PNG pixel count above limit rejected");
+
+            using (Bitmap tooWide = new Bitmap(ImagePayload.MaxDimension + 1, 1))
+            {
+                Assert(ImagePayload.EncodePng(tooWide) == null, "Encoder enforces image dimension limit");
+            }
+        }
+
+        private static void Test_ImageCapture_LargePayloadDeduplicationAndExpiry()
+        {
+            string tempDir = CreateTempDir();
+            try
+            {
+                string payload = CreateNoiseImageBase64(192, 128, 20);
+                Assert(payload.Length > 32768, "Fixture exercises image values beyond text limit");
+                DateTime firstCapture = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+                DateTime clock = firstCapture;
+                Settings settings = new Settings();
+                settings.MaxAgeMinutes = 10;
+                using (HistoryStore store = new HistoryStore(settings, tempDir, delegate() { return clock; }))
+                {
+                    Assert(store.Capture(payload, 1) == null, "Ordinary text limit remains 32 KiB");
+                    Assert(store.CaptureImage("invalid image", 2) == null, "Malformed image is not captured");
+                    ClipEntry image = store.CaptureImage(payload, 3);
+                    Assert(image != null, "Large valid image captured");
+                    AssertEqual("IMAGE", image.Kind, "Image retains its kind");
+                    AssertEqual(payload, image.Text, "Image stores complete raw base64 value");
+                    AssertEqual(payload, store.GetText(image.Id), "Image value is available for copying without text truncation");
+                    store.TogglePin(image.Id);
+                    clock = firstCapture.AddMinutes(4);
+                    store.Capture("a later text value", 4);
+                    clock = firstCapture.AddMinutes(7);
+                    ClipEntry duplicate = store.CaptureImage(payload, 5);
+                    List<ClipEntry> snapshot = store.Snapshot();
+                    AssertEqual(2, snapshot.Count, "Image recopy deduplicates");
+                    AssertEqual(image.Id, duplicate.Id, "Image recopy preserves identity");
+                    AssertEqual(image.Id, snapshot[0].Id, "Image recopy moves value to top");
+                    AssertEqual(firstCapture, snapshot[0].CapturedUtc, "Image recopy preserves original age");
+                    Assert(snapshot[0].IsPinned, "Image recopy preserves pin");
+                    clock = firstCapture.AddMinutes(10);
+                    Assert(store.GetText(image.Id) == null, "Pinned image expires at original age boundary");
+                    AssertEqual(1, store.Snapshot().Count, "Later text survives image expiry");
+                }
+            }
+            finally
+            {
+                CleanupDir(tempDir);
+            }
+        }
+
+        private static void Test_ImageCapture_ProtectionScrubsPayload()
+        {
+            string tempDir = CreateTempDir();
+            try
+            {
+                string payload = CreateNoiseImageBase64(16, 16, 30);
+                using (HistoryStore store = new HistoryStore(new Settings(), tempDir))
+                {
+                    ClipEntry image = store.CaptureImage(payload, 101);
+                    Assert(image != null, "Image is captured before protection");
+                    store.Protect(101);
+                    Assert(store.GetText(image.Id) == null, "Protected image cannot be copied");
+                    Assert(store.Snapshot()[0].IsSensitive, "Protected image is censored");
+                    Assert(string.IsNullOrEmpty(store.Snapshot()[0].Text), "Protected image base64 is scrubbed");
+                    ClipEntry recaptured = store.CaptureImage(payload, 102);
+                    Assert(recaptured != null && recaptured.IsSensitive && string.IsNullOrEmpty(recaptured.Text), "Protected image recapture produces only a blank tombstone");
+                    Assert(store.GetText(recaptured.Id) == null, "Recaptured protected image cannot expose its base64");
+                }
+            }
+            finally
+            {
+                CleanupDir(tempDir);
+            }
+        }
+
+        private static void Test_ImageCapture_PayloadRetentionCap()
+        {
+            string tempDir = CreateTempDir();
+            try
+            {
+                using (HistoryStore store = new HistoryStore(new Settings(), tempDir))
+                {
+                    int capturedBytes = 0;
+                    Guid newest = Guid.Empty;
+                    for (int i = 0; i < 6; i++)
+                    {
+                        string payload = CreateNoiseImageBase64(512, 512, 100 + i);
+                        capturedBytes += Encoding.UTF8.GetByteCount(payload);
+                        ClipEntry captured = store.CaptureImage(payload, (uint)(200 + i));
+                        Assert(captured != null, "Each image fits individual image limit");
+                        newest = captured.Id;
+                    }
+                    const int retentionLimit = 4 * 1024 * 1024;
+                    Assert(capturedBytes > retentionLimit, "Fixture exceeds aggregate retention limit");
+                    List<ClipEntry> snapshot = store.Snapshot();
+                    int retainedBytes = 0;
+                    foreach (ClipEntry item in snapshot)
+                    {
+                        retainedBytes += Encoding.UTF8.GetByteCount(item.Text);
+                    }
+                    Assert(snapshot.Count > 0 && snapshot.Count < 6, "Older image values are pruned to stay within budget");
+                    Assert(retainedBytes <= retentionLimit, "Image values count toward 4 MiB UTF-8 history budget");
+                    AssertEqual(newest, snapshot[0].Id, "Newest image remains available after pruning");
+                }
+            }
+            finally
+            {
+                CleanupDir(tempDir);
+            }
+        }
+
+        private static void Test_ImagePersistence_EncryptedMixedHistoryRoundtrip()
+        {
+            string tempDir = CreateTempDir();
+            try
+            {
+                string payload = CreateNoiseImageBase64(192, 128, 40);
+                DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+                Settings settings = new Settings();
+                settings.PersistHistory = true;
+                Guid imageId;
+                Guid textId;
+                using (HistoryStore store = new HistoryStore(settings, tempDir, delegate() { return now; }))
+                {
+                    imageId = store.CaptureImage(payload, 1).Id;
+                    textId = store.Capture("text stored beside an image", 2).Id;
+                    store.TogglePin(imageId);
+                }
+                string encrypted = Encoding.UTF8.GetString(File.ReadAllBytes(Path.Combine(tempDir, "history.dat")));
+                Assert(encrypted.IndexOf(payload.Substring(0, 80), StringComparison.Ordinal) < 0, "PNG base64 is encrypted on disk");
+                using (HistoryStore restored = new HistoryStore(settings, tempDir, delegate() { return now; }))
+                {
+                    AssertEqual(2, restored.Snapshot().Count, "Mixed image and text history restored");
+                    AssertEqual(payload, restored.GetText(imageId), "Full image base64 survives encrypted reload");
+                    AssertEqual("text stored beside an image", restored.GetText(textId), "Text still restores alongside images");
+                    ClipEntry image = restored.Snapshot().Find(delegate(ClipEntry item) { return item.Id == imageId; });
+                    AssertEqual("IMAGE", image.Kind, "Image kind persists");
+                    Assert(image.IsPinned, "Image pin persists");
+                    AssertEqual(now, image.CapturedUtc, "Image capture age persists");
+                    using (Bitmap decoded = ImagePayload.Decode(image.Text))
+                    {
+                        Assert(decoded != null, "Restored base64 can still render a preview");
+                        AssertEqual(192, decoded.Width, "Restored preview width");
+                    }
+                }
+            }
+            finally
+            {
+                CleanupDir(tempDir);
+            }
+        }
+
+        private static void Test_ImagePersistence_RejectsInvalidImagesAndKeepsLegacyText()
+        {
+            string tempDir = CreateTempDir();
+            try
+            {
+                DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+                HistoryFileDto dto = new HistoryFileDto();
+                dto.Version = 1;
+                dto.Records = new List<HistoryRecordDto>();
+                dto.Records.Add(new HistoryRecordDto { Id = Guid.NewGuid(), Text = "legacy text", CapturedUtc = now, Kind = "TEXT" });
+                dto.Records.Add(new HistoryRecordDto { Id = Guid.NewGuid(), Text = "https://example.com/legacy", CapturedUtc = now });
+                dto.Records.Add(new HistoryRecordDto { Id = Guid.NewGuid(), Text = "not a PNG", CapturedUtc = now, Kind = "IMAGE" });
+                dto.Records.Add(new HistoryRecordDto { Id = Guid.NewGuid(), Text = new string('x', 32769), CapturedUtc = now, Kind = "TEXT" });
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    new DataContractJsonSerializer(typeof(HistoryFileDto)).WriteObject(stream, dto);
+                    byte[] encrypted = ProtectedData.Protect(stream.ToArray(), null, DataProtectionScope.CurrentUser);
+                    File.WriteAllBytes(Path.Combine(tempDir, "history.dat"), encrypted);
+                }
+                Settings settings = new Settings();
+                settings.PersistHistory = true;
+                using (HistoryStore store = new HistoryStore(settings, tempDir, delegate() { return now; }))
+                {
+                    List<ClipEntry> snapshot = store.Snapshot();
+                    AssertEqual(2, snapshot.Count, "Invalid image and oversized text fixture entries are rejected");
+                    Assert(snapshot.Exists(delegate(ClipEntry item) { return item.Kind == "TEXT" && item.Text == "legacy text"; }), "Version 1 text remains compatible");
+                    Assert(snapshot.Exists(delegate(ClipEntry item) { return item.Kind == "LINK" && item.Text == "https://example.com/legacy"; }), "Legacy missing kind still inferred from text");
+                }
+            }
+            finally
+            {
+                CleanupDir(tempDir);
+            }
+        }
+
+        private static string CreateNoiseImageBase64(int width, int height, int seed)
+        {
+            using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+            {
+                BitmapData data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                try
+                {
+                    byte[] pixels = new byte[data.Stride * height];
+                    new Random(seed).NextBytes(pixels);
+                    for (int i = 3; i < pixels.Length; i += 4) pixels[i] = 255;
+                    Marshal.Copy(pixels, 0, data.Scan0, pixels.Length);
+                }
+                finally
+                {
+                    bitmap.UnlockBits(data);
+                }
+                string payload = ImagePayload.EncodePng(bitmap);
+                Assert(payload != null, "Noise fixture encodes within limits");
+                return payload;
+            }
+        }
+
+        private static void SetPngHeaderDimensions(byte[] png, int width, int height)
+        {
+            WriteBigEndian(png, 16, (uint)width);
+            WriteBigEndian(png, 20, (uint)height);
+            // Keep IHDR's CRC valid so dimension guards, not a checksum error, reject the fixture.
+            uint crc = 0xffffffff;
+            for (int i = 12; i < 29; i++)
+            {
+                crc ^= png[i];
+                for (int bit = 0; bit < 8; bit++) crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xedb88320 : crc >> 1;
+            }
+            WriteBigEndian(png, 29, crc ^ 0xffffffff);
+        }
+
+        private static void WriteBigEndian(byte[] bytes, int offset, uint value)
+        {
+            bytes[offset] = (byte)(value >> 24);
+            bytes[offset + 1] = (byte)(value >> 16);
+            bytes[offset + 2] = (byte)(value >> 8);
+            bytes[offset + 3] = (byte)value;
         }
 
         private static void Test_Deduplication_PreservesOriginalCaptureAge()

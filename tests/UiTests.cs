@@ -671,6 +671,75 @@ namespace DollyPaste.Tests
                         }, ref failureCount);
                     }
 
+                    RunTest("Image Base64 Preview, Filtering, Layout and Disposal", delegate
+                    {
+                        string imageDirectory = Path.Combine(tempDir, "ImageUi_" + Guid.NewGuid().ToString("N"));
+                        string imageBase64 = CreateSyntheticImageBase64();
+                        AssertTrue(imageBase64.Length > 32768, "Fixture must exceed the native text edit default limit");
+                        using (HistoryStore imageHistory = new HistoryStore(settings, imageDirectory))
+                        {
+                            imageHistory.Capture("Ordinary text beside image history", 8001);
+                            ClipEntry imageEntry = imageHistory.CaptureImage(imageBase64, 8002);
+                            using (MainForm imageForm = new MainForm(imageHistory, null, imageDirectory, true, false, null))
+                            {
+                                imageForm.ShowInTaskbar = false;
+                                imageForm.StartPosition = FormStartPosition.Manual;
+                                imageForm.Location = new Point(-20000, -20000);
+                                imageForm.Show();
+                                ProcessEvents();
+                                imageForm.FilterImageButton.PerformClick();
+                                AssertEqual(1, imageForm.ClipsListBox.Items.Count, "Images filter must isolate image clips");
+                                AssertTrue(imageForm.DetailKindLabel.Text == "IMAGE", "Image entry must have an IMAGE label");
+                                AssertTrue(imageForm.PreviewTextBox.Text == imageBase64, "Preview must retain the entire raw PNG base64 value");
+                                AssertTrue(imageForm.ImagePreviewBox.Image != null, "Image entry must decode a visual preview");
+                                AssertTrue(imageForm.ImagePreviewBox.Image.Width <= 240 && imageForm.ImagePreviewBox.Image.Height <= 240,
+                                    "Image preview must retain only a bounded thumbnail");
+
+                                imageForm.PreviewToggleButton.PerformClick();
+                                ProcessEvents();
+                                AssertTrue(imageForm.ImagePreviewBox.Visible, "Expanded preview must show the image");
+                                AssertTrue(imageForm.PreviewTextBox.Left >= imageForm.ImagePreviewBox.Parent.Right,
+                                    "Base64 value must appear beside the image");
+                                VerifyMainFormLayout(imageForm);
+                                imageForm.Size = new Size(380, 420);
+                                ProcessEvents();
+                                VerifyMainFormLayout(imageForm);
+                                AssertTrue(imageForm.PreviewTextBox.Width > 100, "Base64 value must remain readable at minimum size");
+                                AssertTrue(imageForm.ImagePreviewBox.Height >= 64, "Image preview must remain visible at minimum size");
+                                AssertTrue(imageForm.ListContainerPanel.Height >= imageForm.ClipsListBox.ItemHeight,
+                                    "Expanded image preview must preserve at least one full clipboard row");
+
+                                using (Bitmap rendered = new Bitmap(imageForm.Width, imageForm.Height))
+                                    imageForm.DrawToBitmap(rendered, new Rectangle(Point.Empty, rendered.Size));
+                                AssertEqual(1, imageForm.CachedImageThumbnailCount, "Painting must cache the image thumbnail");
+                                imageForm.CopyButton.PerformClick();
+                                AssertTrue(GetToast(imageForm).Text.Contains("copy simulated"), "Image copy must use the guarded clipboard-free demo route");
+                                AssertTrue(imageHistory.GetText(imageEntry.Id) == imageBase64, "Copy must preserve the full base64 payload");
+
+                                Image oldPreview = imageForm.ImagePreviewBox.Image;
+                                imageForm.FilterTextButton.PerformClick();
+                                AssertEqual(1, imageForm.ClipsListBox.Items.Count, "Text filter must exclude images");
+                                AssertTrue(imageForm.ImagePreviewBox.Image == null, "Selecting text must clear the image preview");
+                                AssertImageDisposed(oldPreview, "Selecting text must dispose the previous image preview");
+                                imageForm.FilterImageButton.PerformClick();
+                                oldPreview = imageForm.ImagePreviewBox.Image;
+                                imageHistory.Remove(imageEntry.Id);
+                                ProcessEvents();
+                                AssertEqual(0, imageForm.ClipsListBox.Items.Count, "Removed image must leave the image filter empty");
+                                AssertEqual(0, imageForm.CachedImageThumbnailCount, "History refresh must release stale thumbnail cache entries");
+                                AssertTrue(imageForm.ImagePreviewBox.Image == null, "Removing an image must clear its visual preview");
+                                AssertImageDisposed(oldPreview, "Removing an image must dispose its visual preview");
+
+                                imageHistory.CaptureImage(imageBase64, 8003);
+                                ProcessEvents();
+                                oldPreview = imageForm.ImagePreviewBox.Image;
+                                imageForm.Dispose();
+                                AssertEqual(0, imageForm.CachedImageThumbnailCount, "Disposing the form must release cached thumbnails");
+                                AssertImageDisposed(oldPreview, "Disposing the form must release its selected image preview");
+                            }
+                        }
+                    }, ref failureCount);
+
                     RunTest("Live Popup Dismissal Respects Open Settings", delegate
                     {
                         // No WindowsClipboard is constructed; this exercises only form lifecycle behavior.
@@ -750,6 +819,21 @@ namespace DollyPaste.Tests
                                 "The production capture callback must still save clipboard text");
                             AssertTrue(wiringHistory.Snapshot()[0].Text == capturedPayload,
                                 "The production capture callback must preserve plain text");
+
+                            string imageBase64 = CreateSyntheticImageBase64();
+                            try
+                            {
+                                clipboard.Paused = false;
+                                clipboardType.GetMethod("DispatchImageCapture", flags).Invoke(clipboard, new object[] { imageBase64, (uint)7003 });
+                            }
+                            finally
+                            {
+                                clipboard.Paused = true;
+                            }
+                            AssertEqual(3, wiringHistory.Snapshot().Count, "The production image callback must save an image clip");
+                            ClipEntry imageEntry = wiringHistory.Snapshot()[0];
+                            AssertTrue(imageEntry.Kind == "IMAGE", "Production image callback must preserve image classification");
+                            AssertTrue(imageEntry.Text == imageBase64, "Production image callback must preserve full raw base64");
                         }
                     }, ref failureCount);
 
@@ -1063,7 +1147,7 @@ namespace DollyPaste.Tests
             Control[] searchControls = new Control[]
             {
                 form.SearchTextBox, form.NavAllButton, form.NavPinnedButton,
-                form.FilterAllButton, form.FilterTextButton, form.FilterLinkButton, form.FilterCodeButton
+                form.FilterAllButton, form.FilterTextButton, form.FilterLinkButton, form.FilterCodeButton, form.FilterImageButton
             };
             AssertNonOverlappingChildren(searchControls, form.SearchFilterPanel, "Search/filter control");
 
@@ -1226,6 +1310,29 @@ namespace DollyPaste.Tests
             {
                 Application.DoEvents();
             }
+        }
+
+        private static string CreateSyntheticImageBase64()
+        {
+            using (Bitmap bitmap = new Bitmap(160, 120))
+            {
+                Random random = new Random(2026);
+                for (int y = 0; y < bitmap.Height; y++)
+                {
+                    for (int x = 0; x < bitmap.Width; x++)
+                        bitmap.SetPixel(x, y, Color.FromArgb(random.Next(256), random.Next(256), random.Next(256)));
+                }
+                return ImagePayload.EncodePng(bitmap);
+            }
+        }
+
+        private static void AssertImageDisposed(Image image, string message)
+        {
+            AssertTrue(image != null, "Image fixture must exist before disposal");
+            bool disposed = false;
+            try { int ignoredWidth = image.Width; }
+            catch (ArgumentException) { disposed = true; }
+            AssertTrue(disposed, message);
         }
 
         private delegate void TestAction();

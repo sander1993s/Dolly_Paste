@@ -24,7 +24,9 @@ namespace DollyPaste
             RunUiAutomationControlMetadataTests();
             RunPureBoundedFormatPayloadTests();
             RunUnmanagedBufferParsingTests();
+            RunImageCaptureTests();
             RunInjectedPublicationStateMachineTests();
+            RunImageBase64PublicationTests();
             RunPureSchedulingTests();
             RunDestinationClassificationTests();
             RunPasteProtectionDecisionTests();
@@ -371,6 +373,279 @@ namespace DollyPaste
         }
 
         #region Mock Publication Native Implementation
+
+        private const uint TestExcludeFormat = 51001;
+        private const uint TestHistoryFormat = 51002;
+        private const uint TestPngFormat = 51003;
+
+        private sealed class MockCaptureNative : WindowsClipboard.IClipboardCaptureNative, IDisposable
+        {
+            private readonly Dictionary<uint, IntPtr> _formats = new Dictionary<uint, IntPtr>();
+            private readonly Dictionary<IntPtr, ulong> _sizes = new Dictionary<IntPtr, ulong>();
+            private readonly List<IntPtr> _buffers = new List<IntPtr>();
+            internal readonly List<uint> DataReads = new List<uint>();
+            internal uint InitialSequence = 100;
+            internal uint FinalSequence = 100;
+            internal int SequenceReads;
+            internal int LockCount;
+            internal int UnlockCount;
+            internal int BitmapCloneCount;
+            internal IntPtr FailedLock;
+            internal Bitmap SourceBitmap;
+            internal Bitmap LastClone;
+
+            internal IntPtr AddBytes(uint format, byte[] bytes)
+            {
+                IntPtr buffer = Marshal.AllocHGlobal(Math.Max(1, bytes.Length));
+                Marshal.Copy(bytes, 0, buffer, bytes.Length);
+                _buffers.Add(buffer);
+                _formats[format] = buffer;
+                _sizes[buffer] = (ulong)bytes.Length;
+                return buffer;
+            }
+
+            internal void AddBitmap(Bitmap bitmap)
+            {
+                SourceBitmap = bitmap;
+                _formats[2] = (IntPtr)1;
+            }
+
+            internal void SetReportedSize(IntPtr handle, ulong size) { _sizes[handle] = size; }
+            public uint GetSequenceNumber() { return SequenceReads++ == 0 ? InitialSequence : FinalSequence; }
+            public bool IsFormatAvailable(uint format) { return _formats.ContainsKey(format); }
+            public IntPtr GetData(uint format) { DataReads.Add(format); return _formats[format]; }
+            public ulong GetSize(IntPtr handle) { return _sizes[handle]; }
+            public IntPtr Lock(IntPtr handle) { LockCount++; return handle == FailedLock ? IntPtr.Zero : handle; }
+            public void Unlock(IntPtr handle) { UnlockCount++; }
+            public Bitmap CloneBitmap(IntPtr handle)
+            {
+                BitmapCloneCount++;
+                LastClone = (Bitmap)SourceBitmap.Clone();
+                return LastClone;
+            }
+            public void Dispose()
+            {
+                foreach (IntPtr buffer in _buffers) Marshal.FreeHGlobal(buffer);
+                _buffers.Clear();
+            }
+        }
+
+        private static WindowsClipboard.ClipboardReadSnapshot ReadSyntheticClipboard(MockCaptureNative mock)
+        {
+            return WindowsClipboard.ReadOpenedClipboardPayload(mock, 100,
+                TestExcludeFormat, TestHistoryFormat, TestPngFormat, true);
+        }
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr handle);
+
+        private static void RunImageCaptureTests()
+        {
+            Console.WriteLine("\n--- Synthetic Image Capture Tests ---");
+            using (Bitmap source = new Bitmap(4, 3, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                source.SetPixel(1, 1, Color.FromArgb(128, 0, 200, 0));
+                string pngBase64 = ImagePayload.EncodePng(source);
+                byte[] png = Convert.FromBase64String(pngBase64);
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    IntPtr originalBuffer = mock.AddBytes(TestPngFormat, png);
+                    mock.AddBytes(13, Encoding.Unicode.GetBytes("image URL\0"));
+                    mock.AddBitmap(source);
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = ReadSyntheticClipboard(mock))
+                    {
+                        AssertTrue(snapshot != null, "PNG-only payload can be captured without requiring text");
+                        Marshal.WriteByte(originalBuffer, 0, 0);
+                        bool isImage;
+                        string result = snapshot.GetValue(out isImage);
+                        AssertTrue(isImage && result == pngBase64, "PNG snapshot retains exact base64 independently of native memory");
+                        AssertTrue(!mock.DataReads.Contains(13) && mock.BitmapCloneCount == 0, "PNG takes priority over accompanying text and bitmap");
+                        using (Bitmap decoded = ImagePayload.Decode(result))
+                        {
+                            AssertTrue(decoded != null && decoded.Width == 4 && decoded.Height == 3, "Captured PNG decodes to original dimensions");
+                            AssertTrue(decoded.GetPixel(1, 1).A == 128, "PNG capture preserves transparent pixels");
+                        }
+                    }
+                    AssertTrue(mock.LockCount == mock.UnlockCount, "Successful PNG read balances native locks");
+                }
+
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.AddBytes(TestExcludeFormat, new byte[0]);
+                    mock.AddBytes(TestPngFormat, png);
+                    AssertTrue(ReadSyntheticClipboard(mock) == null && mock.DataReads.Count == 0,
+                        "Producer monitor exclusion prevents reading image payloads");
+                }
+                foreach (byte[] history in new byte[][] { BitConverter.GetBytes(0u), new byte[2] })
+                {
+                    using (MockCaptureNative mock = new MockCaptureNative())
+                    {
+                        mock.AddBytes(TestHistoryFormat, history);
+                        mock.AddBytes(TestPngFormat, png);
+                        AssertTrue(ReadSyntheticClipboard(mock) == null && !mock.DataReads.Contains(TestPngFormat),
+                            "Disallowed or malformed history metadata prevents reading images");
+                        AssertTrue(mock.LockCount == mock.UnlockCount, "Privacy metadata read balances native locks");
+                    }
+                }
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.AddBytes(TestHistoryFormat, BitConverter.GetBytes(1u));
+                    mock.AddBytes(TestPngFormat, png);
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = ReadSyntheticClipboard(mock))
+                        AssertTrue(snapshot != null && snapshot.PngBytes != null, "Explicit history permission permits image capture");
+                }
+
+                // Invalid PNG headers, inaccessible PNG memory and oversized PNG buffers use the bitmap fallback.
+                for (int scenario = 0; scenario < 3; scenario++)
+                {
+                    using (MockCaptureNative mock = new MockCaptureNative())
+                    {
+                        IntPtr handle = mock.AddBytes(TestPngFormat, scenario == 0 ? new byte[33] : png);
+                        if (scenario == 1) mock.FailedLock = handle;
+                        if (scenario == 2) mock.SetReportedSize(handle, (ulong)ImagePayload.MaxPngBytes + 1);
+                        mock.AddBitmap(source);
+                        using (WindowsClipboard.ClipboardReadSnapshot snapshot = ReadSyntheticClipboard(mock))
+                        {
+                            bool isImage;
+                            string result = snapshot.GetValue(out isImage);
+                            AssertTrue(isImage && ImagePayload.IsValidBase64(result) && mock.BitmapCloneCount == 1,
+                                "Unreadable PNG uses a valid PNG-encoded bitmap fallback (scenario " + scenario + ")");
+                        }
+                        if (scenario == 2) AssertTrue(mock.LockCount == 0, "Oversized PNG is rejected before locking or copying native memory");
+                    }
+                }
+
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.AddBitmap(source);
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = ReadSyntheticClipboard(mock))
+                    {
+                        bool isImage;
+                        using (Bitmap decoded = ImagePayload.Decode(snapshot.GetValue(out isImage)))
+                            AssertTrue(isImage && decoded.Width == 4 && decoded.Height == 3, "Bitmap-only screenshot captures without a text format");
+                    }
+                }
+                byte[] corruptPng = new byte[48];
+                Array.Copy(png, corruptPng, 33);
+                AssertTrue(ImagePayload.HasValidPngHeader(corruptPng), "Corrupt image fixture has a valid bounded PNG header");
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.AddBytes(TestPngFormat, corruptPng);
+                    mock.AddBitmap(source);
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = ReadSyntheticClipboard(mock))
+                    {
+                        bool isImage;
+                        AssertTrue(snapshot != null && snapshot.GetValue(out isImage) == null && mock.BitmapCloneCount == 0,
+                            "Corrupt PNG body fails decoding without snapshotting a second image initially");
+                    }
+                    using (WindowsClipboard.ClipboardReadSnapshot fallback = WindowsClipboard.ReadOpenedClipboardPayload(
+                        mock, 100, TestExcludeFormat, TestHistoryFormat, 0, true))
+                    {
+                        bool isImage;
+                        string result = fallback.GetValue(out isImage);
+                        AssertTrue(isImage && ImagePayload.IsValidBase64(result) && mock.BitmapCloneCount == 1,
+                            "Same-sequence retry without PNG captures the valid bitmap fallback");
+                    }
+                    AssertTrue(mock.DataReads.FindAll(delegate(uint format) { return format == TestPngFormat; }).Count == 1,
+                        "Bitmap fallback retry does not read the corrupt PNG again");
+                }
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.AddBytes(TestPngFormat, corruptPng);
+                    mock.AddBitmap(source);
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = ReadSyntheticClipboard(mock))
+                    {
+                        bool isImage;
+                        AssertTrue(snapshot.GetValue(out isImage) == null, "Corrupt PNG is rejected before stale fallback test");
+                    }
+                    mock.FinalSequence = 101;
+                    int readsBeforeRetry = mock.DataReads.Count;
+                    AssertTrue(WindowsClipboard.ReadOpenedClipboardPayload(mock, 100,
+                        TestExcludeFormat, TestHistoryFormat, 0, true) == null && mock.DataReads.Count == readsBeforeRetry &&
+                        mock.BitmapCloneCount == 0, "Fallback retry rejects a newer clipboard sequence before reading its bitmap");
+                }
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.InitialSequence = 101;
+                    mock.AddBytes(TestPngFormat, png);
+                    AssertTrue(ReadSyntheticClipboard(mock) == null && mock.DataReads.Count == 0,
+                        "Stale sequence is rejected before reading an image");
+                }
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.FinalSequence = 101;
+                    mock.AddBitmap(source);
+                    AssertTrue(ReadSyntheticClipboard(mock) == null, "Changed sequence rejects a torn image read");
+                    bool disposed = false;
+                    try { int width = mock.LastClone.Width; }
+                    catch (ArgumentException) { disposed = true; }
+                    AssertTrue(disposed, "Rejected image snapshot releases its owned bitmap");
+                }
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.AddBytes(TestPngFormat, png);
+                    mock.AddBytes(13, Encoding.Unicode.GetBytes("plain text\0"));
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = WindowsClipboard.ReadOpenedClipboardPayload(
+                        mock, 100, TestExcludeFormat, TestHistoryFormat, TestPngFormat, false))
+                    {
+                        bool isImage;
+                        AssertTrue(snapshot.GetValue(out isImage) == "plain text" && !isImage,
+                            "Legacy text callback captures text and does not consume image payloads");
+                        AssertTrue(!mock.DataReads.Contains(TestPngFormat), "Disabled image capture leaves PNG native memory unread");
+                    }
+                }
+
+                IntPtr ownedBitmap = source.GetHbitmap();
+                try
+                {
+                    using (Bitmap clone = WindowsClipboard.TryCloneClipboardBitmap(ownedBitmap))
+                        AssertTrue(clone != null && clone.Width == 4 && clone.Height == 3, "Native bitmap snapshot reads a test-owned HBITMAP");
+                    using (Bitmap secondClone = WindowsClipboard.TryCloneClipboardBitmap(ownedBitmap))
+                        AssertTrue(secondClone != null, "Native snapshot leaves source HBITMAP ownership with its producer");
+                }
+                finally { DeleteObject(ownedBitmap); }
+            }
+            AssertTrue(WindowsClipboard.TryCloneClipboardBitmap(IntPtr.Zero) == null, "Null native bitmap handle is rejected");
+            AssertTrue(WindowsClipboard.IsSupportedBitmapSize(4096, 4096), "Bitmap pixel limit is inclusive");
+            AssertTrue(!WindowsClipboard.IsSupportedBitmapSize(4097, 4096), "Excessive bitmap pixel count is rejected before cloning");
+            AssertTrue(!WindowsClipboard.IsSupportedBitmapSize(ImagePayload.MaxDimension + 1, 1), "Excessive bitmap width is rejected before cloning");
+            AssertTrue(!WindowsClipboard.IsSupportedBitmapSize(1, -1), "Invalid bitmap dimensions are rejected before cloning");
+        }
+
+        private static void RunImageBase64PublicationTests()
+        {
+            Console.WriteLine("\n--- Image Base64 Publication Tests ---");
+            using (Bitmap image = new Bitmap(128, 128))
+            {
+                Random random = new Random(1871);
+                for (int y = 0; y < image.Height; y++)
+                    for (int x = 0; x < image.Width; x++)
+                        image.SetPixel(x, y, Color.FromArgb(255, random.Next(256), random.Next(256), random.Next(256)));
+                string base64 = ImagePayload.EncodePng(image);
+                AssertTrue(base64 != null && base64.Length > 32768, "Synthetic PNG base64 exceeds the former text capture length limit");
+                MockPublicationNative mock = new MockPublicationNative();
+                try
+                {
+                    uint sequence;
+                    AssertTrue(WindowsClipboard.ExecutePublication(mock, IntPtr.Zero, base64, out sequence),
+                        "Image base64 publishes through the normal copy path");
+                    AssertTrue(mock.PublishedFormats.Count == 3 && mock.PublishedFormats[0] == 50001 &&
+                        mock.PublishedFormats[1] == 50002 && mock.PublishedFormats[2] == 13,
+                        "Image base64 copy publishes both exclusion formats before Unicode text");
+                    AssertTrue(Marshal.ReadInt32(mock.LockGlobal(mock.TransferredHandles[0])) == 0 &&
+                        Marshal.ReadInt32(mock.LockGlobal(mock.TransferredHandles[1])) == 0,
+                        "Image base64 copy excludes Windows history and cloud upload");
+                    IntPtr textBuffer = mock.LockGlobal(mock.TransferredHandles[2]);
+                    AssertTrue(Marshal.PtrToStringUni(textBuffer) == base64, "Image base64 Unicode clipboard text is complete and untruncated");
+                    byte[] expectedBytes = Encoding.Unicode.GetBytes(base64 + "\0");
+                    byte[] actualBytes = new byte[expectedBytes.Length];
+                    Marshal.Copy(textBuffer, actualBytes, 0, actualBytes.Length);
+                    AssertTrue(Convert.ToBase64String(actualBytes) == Convert.ToBase64String(expectedBytes),
+                        "Image base64 publishes exact UTF-16 bytes including the null terminator");
+                }
+                finally { mock.Cleanup(); }
+            }
+        }
 
         private sealed class MockPublicationNative : WindowsClipboard.IClipboardPublicationNative
         {

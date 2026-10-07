@@ -1,4 +1,5 @@
 using System;
+using System.Drawing;
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
@@ -198,6 +199,17 @@ namespace DollyPaste
                         "Remember to send the meeting notes after lunch.",
                         4);
 
+                    // 5. Locally generated image (IMAGE); no system clipboard access.
+                    using (Bitmap sampleImage = new Bitmap(120, 80))
+                    {
+                        using (Graphics graphics = Graphics.FromImage(sampleImage))
+                        {
+                            graphics.Clear(Brand.WarmWoolCanvas);
+                            Brand.DrawSheep(graphics, new RectangleF(28, 8, 64, 64));
+                        }
+                        history.CaptureImage(ImagePayload.EncodePng(sampleImage), 5);
+                    }
+
                     // Demo/preview never instantiates WindowsClipboard or touches system clipboard
                     using (MainForm form = new MainForm(history, null, tempDir, isDemoMode, isPreviewMode, previewOutputPath))
                     {
@@ -318,6 +330,7 @@ namespace DollyPaste
             return new WindowsClipboard(
                 form,
                 delegate(string text, uint sequence) { history.Capture(text, sequence); },
+                delegate(string base64, uint sequence) { history.CaptureImage(base64, sequence); },
                 delegate { form.ToggleVisibility(); },
                 startPaused);
         }

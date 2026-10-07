@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -14,6 +15,7 @@ namespace DollyPaste
         #region Win32 Constants and P/Invoke
 
         private const uint GMEM_MOVEABLE = 0x0002;
+        private const uint CF_BITMAP = 2;
         private const uint CF_UNICODETEXT = 13;
 
         private const uint MOD_CONTROL = 0x0002;
@@ -72,6 +74,21 @@ namespace DollyPaste
             public int right;
             public int bottom;
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BITMAP
+        {
+            public int Type;
+            public int Width;
+            public int Height;
+            public int WidthBytes;
+            public ushort Planes;
+            public ushort BitsPixel;
+            public IntPtr Bits;
+        }
+
+        [DllImport("gdi32.dll", EntryPoint = "GetObjectW")]
+        private static extern int GetBitmapObject(IntPtr bitmap, int size, out BITMAP info);
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -179,6 +196,7 @@ namespace DollyPaste
         internal static readonly uint FormatExcludeFromMonitor = RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing");
         internal static readonly uint FormatCanIncludeInHistory = RegisterClipboardFormat("CanIncludeInClipboardHistory");
         internal static readonly uint FormatCanUploadToCloud = RegisterClipboardFormat("CanUploadToCloudClipboard");
+        internal static readonly uint FormatPng = RegisterClipboardFormat("PNG");
 
         #endregion
 
@@ -186,6 +204,7 @@ namespace DollyPaste
 
         private readonly Form _owner;
         private readonly Action<string, uint> _onCapture;
+        private readonly Action<string, uint> _onImageCapture;
         private readonly Action<uint> _onProtect;
         private readonly Action _onToggle;
         private readonly Func<bool> _protectUnknown;
@@ -247,19 +266,39 @@ namespace DollyPaste
         {
         }
 
+        public WindowsClipboard(
+            Form owner,
+            Action<string, uint> onCapture,
+            Action<string, uint> onImageCapture,
+            Action onToggle)
+            : this(owner, onCapture, onImageCapture, null, onToggle, null, false)
+        {
+        }
+
         // Starting paused permits verifying the production listener without reading clipboard payloads.
         internal WindowsClipboard(
             Form owner,
             Action<string, uint> onCapture,
             Action onToggle,
             bool startPaused)
-            : this(owner, onCapture, null, onToggle, null, startPaused)
+            : this(owner, onCapture, null, null, onToggle, null, startPaused)
+        {
+        }
+
+        internal WindowsClipboard(
+            Form owner,
+            Action<string, uint> onCapture,
+            Action<string, uint> onImageCapture,
+            Action onToggle,
+            bool startPaused)
+            : this(owner, onCapture, onImageCapture, null, onToggle, null, startPaused)
         {
         }
 
         private WindowsClipboard(
             Form owner,
             Action<string, uint> onCapture,
+            Action<string, uint> onImageCapture,
             Action<uint> onProtect,
             Action onToggle,
             Func<bool> protectUnknown,
@@ -272,6 +311,7 @@ namespace DollyPaste
 
             _owner = owner;
             _onCapture = onCapture;
+            _onImageCapture = onImageCapture;
             _onProtect = onProtect;
             _onToggle = onToggle;
             _protectUnknown = protectUnknown;
@@ -1402,6 +1442,16 @@ namespace DollyPaste
 
         private void DispatchCapture(string text, uint sequence)
         {
+            DispatchPayload(text, sequence, false);
+        }
+
+        private void DispatchImageCapture(string text, uint sequence)
+        {
+            DispatchPayload(text, sequence, true);
+        }
+
+        private void DispatchPayload(string text, uint sequence, bool isImage)
+        {
             if (_disposed || _paused)
             {
                 return;
@@ -1413,9 +1463,10 @@ namespace DollyPaste
                 {
                     return;
                 }
-                if (_onCapture != null)
+                Action<string, uint> callback = isImage ? _onImageCapture : _onCapture;
+                if (callback != null)
                 {
-                    _onCapture(text, sequence);
+                    callback(text, sequence);
                 }
             });
         }
@@ -1481,6 +1532,153 @@ namespace DollyPaste
 
         #region Native Clipboard Update & Coalesced Async Reader
 
+        // This seam permits verifying capture against owned buffers without reading the user's clipboard.
+        internal interface IClipboardCaptureNative
+        {
+            uint GetSequenceNumber();
+            bool IsFormatAvailable(uint format);
+            IntPtr GetData(uint format);
+            ulong GetSize(IntPtr handle);
+            IntPtr Lock(IntPtr handle);
+            void Unlock(IntPtr handle);
+            Bitmap CloneBitmap(IntPtr handle);
+        }
+
+        internal sealed class Win32CaptureNative : IClipboardCaptureNative
+        {
+            internal static readonly Win32CaptureNative Instance = new Win32CaptureNative();
+            public uint GetSequenceNumber() { return GetClipboardSequenceNumber(); }
+            public bool IsFormatAvailable(uint format) { return IsClipboardFormatAvailable(format); }
+            public IntPtr GetData(uint format) { return GetClipboardData(format); }
+            public ulong GetSize(IntPtr handle) { return GlobalSize(handle).ToUInt64(); }
+            public IntPtr Lock(IntPtr handle) { return GlobalLock(handle); }
+            public void Unlock(IntPtr handle) { GlobalUnlock(handle); }
+            public Bitmap CloneBitmap(IntPtr handle) { return TryCloneClipboardBitmap(handle); }
+        }
+
+        internal sealed class ClipboardReadSnapshot : IDisposable
+        {
+            internal string Text;
+            internal byte[] PngBytes;
+            internal Bitmap Bitmap;
+
+            // Image decoding/encoding runs only after CloseClipboard so other applications can copy.
+            internal string GetValue(out bool isImage)
+            {
+                isImage = PngBytes != null || Bitmap != null;
+                if (PngBytes != null) return ImagePayload.FromPngBytes(PngBytes);
+                if (Bitmap != null) return ImagePayload.EncodePng(Bitmap);
+                return Text;
+            }
+
+            public void Dispose()
+            {
+                PngBytes = null;
+                Text = null;
+                if (Bitmap != null)
+                {
+                    Bitmap.Dispose();
+                    Bitmap = null;
+                }
+            }
+        }
+
+        internal static bool IsSupportedBitmapSize(int width, int height)
+        {
+            return ImagePayload.AreDimensionsAllowed(width, height);
+        }
+
+        internal static Bitmap TryCloneClipboardBitmap(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero) return null;
+            BITMAP info;
+            if (GetBitmapObject(handle, Marshal.SizeOf(typeof(BITMAP)), out info) == 0 ||
+                !IsSupportedBitmapSize(info.Width, info.Height)) return null;
+            try
+            {
+                // FromHbitmap makes a private copy; the clipboard retains ownership of the original handle.
+                return Image.FromHbitmap(handle);
+            }
+            catch (ArgumentException) { return null; }
+            catch (ExternalException) { return null; }
+            catch (OutOfMemoryException) { return null; }
+        }
+
+        internal static byte[] TryCopyClipboardBytes(IClipboardCaptureNative native, IntPtr handle, int maximumBytes)
+        {
+            if (handle == IntPtr.Zero) return null;
+            ulong size = native.GetSize(handle);
+            if (size == 0 || size > (ulong)maximumBytes) return null;
+            IntPtr buffer = native.Lock(handle);
+            if (buffer == IntPtr.Zero) return null;
+            try
+            {
+                byte[] bytes = new byte[(int)size];
+                Marshal.Copy(buffer, bytes, 0, bytes.Length);
+                return bytes;
+            }
+            finally { native.Unlock(handle); }
+        }
+
+        internal static ClipboardReadSnapshot ReadOpenedClipboardPayload(
+            IClipboardCaptureNative native, uint expectedSequence,
+            uint excludeFormat, uint historyFormat, uint pngFormat, bool captureImages)
+        {
+            if (native.GetSequenceNumber() != expectedSequence) return null;
+            if (excludeFormat != 0 && native.IsFormatAvailable(excludeFormat)) return null;
+            if (historyFormat != 0 && native.IsFormatAvailable(historyFormat))
+            {
+                IntPtr historyHandle = native.GetData(historyFormat);
+                if (historyHandle == IntPtr.Zero || native.GetSize(historyHandle) < 4) return null;
+                IntPtr historyBuffer = native.Lock(historyHandle);
+                if (historyBuffer == IntPtr.Zero) return null;
+                uint historyValue;
+                try { historyValue = (uint)Marshal.ReadInt32(historyBuffer); }
+                finally { native.Unlock(historyHandle); }
+                if (historyValue == 0) return null;
+            }
+
+            ClipboardReadSnapshot snapshot = new ClipboardReadSnapshot();
+            bool accepted = false;
+            try
+            {
+                if (captureImages && pngFormat != 0 && native.IsFormatAvailable(pngFormat))
+                {
+                    snapshot.PngBytes = TryCopyClipboardBytes(native, native.GetData(pngFormat), ImagePayload.MaxPngBytes);
+                    if (!ImagePayload.HasValidPngHeader(snapshot.PngBytes)) snapshot.PngBytes = null;
+                }
+                if (captureImages && snapshot.PngBytes == null && native.IsFormatAvailable(CF_BITMAP))
+                {
+                    snapshot.Bitmap = native.CloneBitmap(native.GetData(CF_BITMAP));
+                }
+                if (snapshot.PngBytes == null && snapshot.Bitmap == null && native.IsFormatAvailable(CF_UNICODETEXT))
+                {
+                    IntPtr textHandle = native.GetData(CF_UNICODETEXT);
+                    if (textHandle != IntPtr.Zero)
+                    {
+                        ulong byteLength = native.GetSize(textHandle);
+                        if (byteLength >= 2 && byteLength % 2 == 0)
+                        {
+                            IntPtr textBuffer = native.Lock(textHandle);
+                            if (textBuffer != IntPtr.Zero)
+                            {
+                                try { TryParseUnicodeTextFromBuffer(textBuffer, byteLength, out snapshot.Text); }
+                                finally { native.Unlock(textHandle); }
+                            }
+                        }
+                    }
+                }
+                if (snapshot.PngBytes == null && snapshot.Bitmap == null && string.IsNullOrEmpty(snapshot.Text)) return null;
+                if (native.GetSequenceNumber() != expectedSequence) return null;
+                accepted = true;
+                return snapshot;
+            }
+            finally
+            {
+                if (!accepted) snapshot.Dispose();
+            }
+        }
+
         private void OnClipboardUpdated()
         {
             if (_disposed)
@@ -1540,147 +1738,50 @@ namespace DollyPaste
 
         private void ReadClipboardPayload(uint expectedSeq)
         {
-            if (_disposed || _paused)
+            // Retry once without PNG if its header is valid but its encoded body cannot be decoded.
+            for (int attempt = 0; attempt < 2; attempt++)
             {
-                return;
-            }
+                if (_disposed || _paused) return;
 
-            // Bounded retries for contention; never blocks UI
-            bool opened = false;
-            for (int retry = 0; retry < 5; retry++)
-            {
-                if (_disposed || _paused)
+                // Bounded retries for contention; never blocks UI.
+                bool opened = false;
+                for (int retry = 0; retry < 5; retry++)
                 {
-                    return;
-                }
-                if (OpenClipboard(IntPtr.Zero))
-                {
-                    opened = true;
-                    break;
-                }
-                Thread.Sleep(15);
-            }
-
-            if (!opened)
-            {
-                return;
-            }
-
-            string capturedText = null;
-
-            try
-            {
-                uint seqBefore = GetClipboardSequenceNumber();
-                if (seqBefore != expectedSeq)
-                {
-                    return; // Clipboard already advanced
-                }
-
-                // Check producer formats BEFORE reading text:
-                // 1. ExcludeClipboardContentFromMonitorProcessing skips
-                if (FormatExcludeFromMonitor != 0 && IsClipboardFormatAvailable(FormatExcludeFromMonitor))
-                {
-                    return;
-                }
-
-                // 2. CanIncludeInClipboardHistory DWORD 0 skips; fail closed on malformed metadata (< 4 bytes)
-                if (FormatCanIncludeInHistory != 0 && IsClipboardFormatAvailable(FormatCanIncludeInHistory))
-                {
-                    IntPtr hHist = GetClipboardData(FormatCanIncludeInHistory);
-                    if (hHist == IntPtr.Zero)
+                    if (_disposed || _paused) return;
+                    if (OpenClipboard(IntPtr.Zero))
                     {
-                        return; // fail closed
+                        opened = true;
+                        break;
                     }
-
-                    UIntPtr sizeHist = GlobalSize(hHist);
-                    if (sizeHist.ToUInt64() < 4)
-                    {
-                        return; // fail closed on malformed metadata
-                    }
-
-                    IntPtr pHist = GlobalLock(hHist);
-                    if (pHist == IntPtr.Zero)
-                    {
-                        return; // fail closed
-                    }
-
-                    uint historyDword = 0;
-                    try
-                    {
-                        historyDword = (uint)Marshal.ReadInt32(pHist);
-                    }
-                    finally
-                    {
-                        GlobalUnlock(hHist);
-                    }
-
-                    if (historyDword == 0)
-                    {
-                        return; // Excluded from history
-                    }
+                    Thread.Sleep(15);
                 }
+                if (!opened) return;
 
-                // 3. Must have CF_UNICODETEXT
-                if (!IsClipboardFormatAvailable(CF_UNICODETEXT))
-                {
-                    return;
-                }
-
-                IntPtr hText = GetClipboardData(CF_UNICODETEXT);
-                if (hText == IntPtr.Zero)
-                {
-                    return;
-                }
-
-                UIntPtr sizeBytes = GlobalSize(hText);
-                ulong byteLen = sizeBytes.ToUInt64();
-                if (byteLen < 2 || (byteLen % 2) != 0)
-                {
-                    return; // Validate even allocation
-                }
-
-                IntPtr pText = GlobalLock(hText);
-                if (pText == IntPtr.Zero)
-                {
-                    return;
-                }
-
+                ClipboardReadSnapshot snapshot;
                 try
                 {
-                    string parsed;
-                    if (TryParseUnicodeTextFromBuffer(pText, byteLen, out parsed))
+                    snapshot = ReadOpenedClipboardPayload(Win32CaptureNative.Instance, expectedSeq,
+                        FormatExcludeFromMonitor, FormatCanIncludeInHistory, attempt == 0 ? FormatPng : 0, _onImageCapture != null);
+                }
+                finally { CloseClipboard(); }
+
+                using (snapshot)
+                {
+                    if (snapshot == null || _disposed || _paused) return;
+                    bool isImage;
+                    string value = snapshot.GetValue(out isImage);
+                    if (!string.IsNullOrEmpty(value))
                     {
-                        capturedText = parsed;
+                        // Keep the payload's exact sequence even if a newer copy arrives during image encoding.
+                        if (isImage) DispatchImageCapture(value, expectedSeq);
+                        else DispatchCapture(value, expectedSeq);
+                        return;
                     }
+                    if (snapshot.PngBytes == null) return;
                 }
-                finally
-                {
-                    GlobalUnlock(hText);
-                }
-
-                if (string.IsNullOrEmpty(capturedText))
-                {
-                    return;
-                }
-
-                uint seqAfter = GetClipboardSequenceNumber();
-                if (seqBefore != seqAfter)
-                {
-                    return; // Sequence changed during read; payload torn
-                }
-            }
-            finally
-            {
-                CloseClipboard();
-            }
-
-            if (!string.IsNullOrEmpty(capturedText))
-            {
-                // Dispatch payload with its exact captured sequence without overwriting newer current sequence
-                DispatchCapture(capturedText, expectedSeq);
+                // The second snapshot rechecks the original sequence and privacy flags before reading anything.
             }
         }
-
         #endregion
 
         #region Keyboard Hook & Paste Detection

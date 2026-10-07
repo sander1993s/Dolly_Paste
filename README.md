@@ -16,6 +16,7 @@ Trusted code signing is being prepared. No SignPath Foundation application has b
 - **In-Memory by Default**: Clipboard history is kept in volatile memory and discarded upon exit unless encrypted persistence is explicitly enabled.
 - **Bounded Retention**: Configurable time-based retention (1 to 43,200 minutes) and capacity (10 to 1,000 clips). Pinned items remain subject to both maximum capacity count and retention age limits, as well as a 4 MiB total payload cap.
 - **Predictable History**: Pasting no longer censors or discards saved clips. Automatic password-field and paste-destination detection has been removed.
+- **Images as Base64**: Copied images are saved as PNG base64 with a thumbnail beside the value. Use the Images filter or expand the preview to see the image and full value together. Copy, Enter, and Ctrl+C publish the raw base64 text.
 - **Fast Keyboard Workflow**:
   - `Ctrl+Shift+V`: Global shortcut to toggle Dolly Paste visibility.
   - `Ctrl+F`: Instantly focus search filter.
@@ -23,7 +24,7 @@ Trusted code signing is being prepared. No SignPath Foundation application has b
   - `Enter`: Copy the selected clip from search or the history list, then dismiss the popup.
   - `Ctrl+C`: Copy the selected clip from the list or search, including immediately after opening the popup. If search text is highlighted, copy that text instead.
   - `Ctrl+P`: Pin or unpin the selected clip from search or the list.
-  - `Ctrl+Space`: Show or hide the full-text preview.
+  - `Ctrl+Space`: Show or hide the full-value preview, including an image preview for image clips.
   - `Delete`: Remove selected clip.
   - `Esc`: Hide window to system tray.
 - **Compact Native Popup**: A 420 × 520 clipboard picker with warm wool colors, sheep branding, search, All/Pinned navigation, content filters, and an optional full-text preview. The popup opens near the pointer, fits the current monitor, and stays out of the taskbar. Minimum size is 380 × 420, subject to the available screen space.
@@ -88,7 +89,7 @@ To explore the interface without accessing or modifying your system clipboard:
 
 In demo mode:
 - System clipboard monitoring and global hooks are completely disabled.
-- Synthetic sample clips (notes, a link, and a code snippet) are loaded into an isolated temporary store.
+- Synthetic sample clips (notes, a link, a code snippet, and an image) are loaded into an isolated temporary store.
 - A prominent banner indicates "Preview mode — recording disabled".
 - Copy actions are simulated and leave the popup open. Clicking away does not dismiss demo or screenshot previews.
 
@@ -125,9 +126,11 @@ The test runner compiles the CoreTests, PlatformTests, and UiTests suites into a
 2. **Encrypted History Persistence**:
    - When history persistence is enabled in Settings, stored clips are encrypted using the Windows Data Protection API (DPAPI) tied to the current Windows user profile before writing to `history.dat`.
 
-3. **Format Handling (`CF_UNICODETEXT`)**:
-   - Dolly Paste exclusively reads standard plain text (`CF_UNICODETEXT` or `CF_TEXT`) from the system clipboard.
-   - Other clipboard formats (HTML, RTF, images, shell file drops, custom binary streams) are ignored entirely. They are not sanitized, stripped, or converted with a security guarantee.
+3. **Format Handling (Text and Images)**:
+   - Dolly Paste reads standard plain text (`CF_UNICODETEXT`, including Windows conversions from `CF_TEXT`) and images (registered PNG format, with Windows bitmap fallback).
+   - Images take priority when the source also supplies text. Image entries store raw PNG base64 without a `data:image/png;base64,` prefix. Capturing an image leaves the source clipboard intact; selecting Copy in Dolly Paste publishes its base64 text.
+   - Each PNG is limited to 3 MiB encoded bytes (4 MiB base64), 8,192 pixels per dimension, and 16,777,216 total pixels. Unsupported, malformed, or oversized images are skipped. Images share the existing 4 MiB total history payload cap and can cause older entries to be evicted.
+   - HTML, RTF, shell file drops, and other custom binary streams are not captured directly. Copy image pixels from the source application; copying an image file in Explorer is a file drop, not an image payload.
    - Plain text clips are capped at a maximum of 32,768 characters per item.
 
 4. **Retention Bounds and Eviction**:

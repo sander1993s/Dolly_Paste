@@ -161,6 +161,7 @@ namespace DollyPaste
         private Button _btnFilterText;
         private Button _btnFilterLink;
         private Button _btnFilterCode;
+        private Button _btnFilterImage;
 
         private Panel _pnlContent;
         private Panel _pnlListContainer;
@@ -182,6 +183,11 @@ namespace DollyPaste
         private Button _btnDelete;
         private Label _lblCharCount;
         private TextBox _txtPreview;
+        private Panel _pnlImagePreview;
+        private PictureBox _picImagePreview;
+        private Guid? _previewImageId;
+        private readonly Dictionary<Guid, Bitmap> _imageThumbnails = new Dictionary<Guid, Bitmap>();
+        private const int MaxCachedImageThumbnails = 64;
 
         private Panel _pnlStatusBar;
         private Label _lblStatusLeft;
@@ -371,7 +377,7 @@ namespace DollyPaste
             _pnlSearchFilter.Controls.Add(_txtSearch);
             _pnlSearchFilter.Resize += delegate
             {
-                _txtSearch.Width = Math.Max(1, _pnlSearchFilter.ClientSize.Width - 24);
+                UpdateSearchFilterLayout();
             };
 
             _btnNavAll = CreateActionButton("All", 64, delegate
@@ -386,15 +392,15 @@ namespace DollyPaste
                 UpdateNavStyles();
                 ApplyFilters();
             });
-            _btnNavAll.SetBounds(12, 44, 64, 28);
-            _btnNavPinned.SetBounds(80, 44, 72, 28);
             _pnlSearchFilter.Controls.AddRange(new Control[] { _btnNavAll, _btnNavPinned });
-            int filterX = 162;
+            int filterX = 12;
             _btnFilterAll = CreateFilterPill("Any", null, 40, ref filterX);
             _btnFilterText = CreateFilterPill("Text", "TEXT", 42, ref filterX);
             _btnFilterLink = CreateFilterPill("Links", "LINK", 44, ref filterX);
             _btnFilterCode = CreateFilterPill("Code", "CODE", 44, ref filterX);
+            _btnFilterImage = CreateFilterPill("Images", "IMAGE", 60, ref filterX);
             _toolTip.SetToolTip(_btnFilterAll, "Show every content type");
+            UpdateSearchFilterLayout();
 
             _pnlContent = new Panel { Dock = DockStyle.Fill };
             InitializeDetailPane();
@@ -494,6 +500,14 @@ namespace DollyPaste
             _btnPauseResume.Location = new Point(_btnSettings.Left - 68, 10);
         }
 
+        private void UpdateSearchFilterLayout()
+        {
+            if (_btnNavAll == null || _btnNavPinned == null) return;
+            _btnNavPinned.SetBounds(_pnlSearchFilter.ClientSize.Width - 84, 3, 72, 28);
+            _btnNavAll.SetBounds(_btnNavPinned.Left - 68, 3, 64, 28);
+            _txtSearch.Width = Math.Max(1, _btnNavAll.Left - _txtSearch.Left - 8);
+        }
+
         private void TogglePreview()
         {
             _previewExpanded = !_previewExpanded;
@@ -505,8 +519,13 @@ namespace DollyPaste
 
         private void UpdatePreviewHeight()
         {
+            bool hasImage = _picImagePreview != null && _picImagePreview.Image != null;
+            int minimumListHeight = hasImage ? 54 : 100;
+            if (_pnlDetailMeta != null) _pnlDetailMeta.Height = hasImage ? 24 : 28;
+            if (_pnlTextContainer != null)
+                _pnlTextContainer.Padding = hasImage ? new Padding(14, 0, 14, 4) : new Padding(14, 3, 14, 6);
             if (_pnlDetail != null && _pnlContent != null)
-                _pnlDetail.Height = Math.Max(0, Math.Min(168, _pnlContent.ClientSize.Height - 100));
+                _pnlDetail.Height = Math.Max(0, Math.Min(168, _pnlContent.ClientSize.Height - minimumListHeight));
         }
 
         private void UpdateEmptyStateLayout()
@@ -542,7 +561,7 @@ namespace DollyPaste
             _pnlDetailEmpty.BackColor = Color.White;
 
             Label lblDetailEmpty = new Label();
-            lblDetailEmpty.Text = "Select a clip to preview its text";
+            lblDetailEmpty.Text = "Select a clip to preview its content";
             lblDetailEmpty.Font = _fontPreviewRegular;
             lblDetailEmpty.ForeColor = Brand.TextSecondary;
             lblDetailEmpty.TextAlign = ContentAlignment.MiddleCenter;
@@ -659,6 +678,16 @@ namespace DollyPaste
             _txtPreview.Font = _fontPreviewRegular;
             _txtPreview.AccessibleName = "Clip content preview";
             _pnlTextContainer.Controls.Add(_txtPreview);
+
+            _pnlImagePreview = new Panel { Dock = DockStyle.Left, Width = 132,
+                Padding = new Padding(0, 0, 10, 0), Visible = false };
+            _picImagePreview = new PictureBox { Dock = DockStyle.Fill,
+                SizeMode = PictureBoxSizeMode.Zoom, BackColor = Brand.WarmWoolCanvas,
+                AccessibleName = "Copied image preview", TabStop = false };
+            _pnlImagePreview.Controls.Add(_picImagePreview);
+            _pnlTextContainer.Controls.Add(_pnlImagePreview);
+            _pnlTextContainer.Controls.SetChildIndex(_txtPreview, 0);
+            _pnlTextContainer.Controls.SetChildIndex(_pnlImagePreview, 1);
 
             // Detail Content Order: Fill (_pnlTextContainer at 0), Top (_pnlDetailMeta at 1), Top (_pnlDetailToolbar at 2)
             _pnlDetailContent.Controls.Add(_pnlTextContainer);
@@ -818,6 +847,7 @@ namespace DollyPaste
                 _isRefreshing = true;
                 _history.Prune();
                 _allClips = _history.Snapshot();
+                ClearImageThumbnails();
 
                 ApplyFilters();
                 UpdateNavStyles();
@@ -939,7 +969,7 @@ namespace DollyPaste
                 else
                 {
                     _lblEmptyTitle.Text = "Clipboard history is empty";
-                    _lblEmptySubtitle.Text = "Copy text in any application to save it here.\nClips are stored 100% locally on this device.";
+                    _lblEmptySubtitle.Text = "Copy text or an image to save it here.\nClips are stored 100% locally on this device.";
                 }
             }
             else
@@ -958,6 +988,7 @@ namespace DollyPaste
                 _pnlDetailContent.Visible = false;
                 _pnlDetailEmpty.Visible = true;
                 _txtPreview.Text = "";
+                ClearImagePreview();
                 _btnCopy.Enabled = false;
                 _btnPin.Enabled = false;
                 _btnDelete.Enabled = false;
@@ -995,6 +1026,7 @@ namespace DollyPaste
 
             if (clip.IsSensitive)
             {
+                ClearImagePreview();
                 _lblDetailKind.Text = "PROTECTED";
                 _lblDetailKind.BackColor = Brand.SensitiveBg;
                 _lblDetailKind.ForeColor = Brand.SensitiveFg;
@@ -1032,9 +1064,11 @@ namespace DollyPaste
 
                 if (fullText != null)
                 {
+                    UpdateImagePreview(clip, fullText);
                     // Native multiline edit controls expect CRLF; keep stored/copied text unchanged.
                     _txtPreview.Text = fullText.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
-                    if (string.Equals(kind, "CODE", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(kind, "CODE", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(kind, "IMAGE", StringComparison.OrdinalIgnoreCase))
                     {
                         _txtPreview.Font = _fontPreviewCode;
                     }
@@ -1059,6 +1093,60 @@ namespace DollyPaste
                 }
                 UpdateDetailMetaLayout();
             }
+        }
+
+        private void UpdateImagePreview(ClipEntry clip, string base64)
+        {
+            if (!string.Equals(clip.Kind, "IMAGE", StringComparison.OrdinalIgnoreCase))
+            {
+                ClearImagePreview();
+                return;
+            }
+            if (_previewImageId != clip.Id)
+            {
+                ClearImagePreview();
+                _picImagePreview.Image = ImagePayload.CreateThumbnail(base64, new Size(240, 240));
+                _previewImageId = clip.Id;
+            }
+            _pnlImagePreview.Visible = _picImagePreview.Image != null;
+            _txtPreview.AccessibleName = "Image PNG base64 value";
+            _btnCopy.AccessibleName = "Copy image base64 to clipboard";
+            _toolTip.SetToolTip(_btnCopy, "Copy full PNG base64 and close (Enter or Ctrl+C)");
+            UpdatePreviewHeight();
+        }
+
+        private void ClearImagePreview()
+        {
+            Image previous = _picImagePreview.Image;
+            _picImagePreview.Image = null;
+            if (previous != null) previous.Dispose();
+            _previewImageId = null;
+            _pnlImagePreview.Visible = false;
+            _txtPreview.AccessibleName = "Clip content preview";
+            _btnCopy.AccessibleName = "Copy selected clip to clipboard";
+            _toolTip.SetToolTip(_btnCopy, "Copy selected clip and close (Enter or Ctrl+C)");
+            UpdatePreviewHeight();
+        }
+
+        private Bitmap GetImageThumbnail(ClipEntry clip)
+        {
+            Bitmap thumbnail;
+            if (!_imageThumbnails.TryGetValue(clip.Id, out thumbnail))
+            {
+                if (_imageThumbnails.Count >= MaxCachedImageThumbnails) ClearImageThumbnails();
+                thumbnail = ImagePayload.CreateThumbnail(clip.Text, new Size(38, 38));
+                _imageThumbnails.Add(clip.Id, thumbnail);
+            }
+            return thumbnail;
+        }
+
+        private void ClearImageThumbnails()
+        {
+            foreach (Bitmap thumbnail in _imageThumbnails.Values)
+            {
+                if (thumbnail != null) thumbnail.Dispose();
+            }
+            _imageThumbnails.Clear();
         }
 
         private void CopySelectedClip()
@@ -1227,6 +1315,7 @@ namespace DollyPaste
             ApplyFilterPillStyle(_btnFilterText, string.Equals(_currentKindFilter, "TEXT", StringComparison.OrdinalIgnoreCase));
             ApplyFilterPillStyle(_btnFilterLink, string.Equals(_currentKindFilter, "LINK", StringComparison.OrdinalIgnoreCase));
             ApplyFilterPillStyle(_btnFilterCode, string.Equals(_currentKindFilter, "CODE", StringComparison.OrdinalIgnoreCase));
+            ApplyFilterPillStyle(_btnFilterImage, string.Equals(_currentKindFilter, "IMAGE", StringComparison.OrdinalIgnoreCase));
         }
 
         private void ApplyFilterPillStyle(Button btn, bool active)
@@ -1403,10 +1492,25 @@ namespace DollyPaste
             }
 
             string kind = item.IsSensitive ? "PROTECTED" : (item.Kind ?? "TEXT");
+            bool isImage = !item.IsSensitive && string.Equals(kind, "IMAGE", StringComparison.OrdinalIgnoreCase);
+            int contentLeft = bounds.X + 14;
+            if (isImage)
+            {
+                Bitmap thumbnail = GetImageThumbnail(item);
+                Rectangle imageBounds = new Rectangle(contentLeft, bounds.Y + 8, 38, 38);
+                using (SolidBrush imageBackground = new SolidBrush(Brand.WarmWoolCanvas))
+                    g.FillRectangle(imageBackground, imageBounds);
+                if (thumbnail != null)
+                    g.DrawImageUnscaled(thumbnail, imageBounds.X + (imageBounds.Width - thumbnail.Width) / 2,
+                        imageBounds.Y + (imageBounds.Height - thumbnail.Height) / 2);
+                using (Pen imageBorder = new Pen(Brand.BorderLight))
+                    g.DrawRectangle(imageBorder, imageBounds);
+                contentLeft += 48;
+            }
             Color badgeBg = Brand.GetKindBadgeBg(kind);
             Color badgeFg = Brand.GetKindBadgeFg(kind);
             int badgeWidth = item.IsSensitive ? 86 : 54;
-            Rectangle badgeRect = new Rectangle(bounds.X + 14, bounds.Y + 8, badgeWidth, 18);
+            Rectangle badgeRect = new Rectangle(contentLeft, bounds.Y + 8, badgeWidth, 18);
 
             using (SolidBrush badgeBrush = new SolidBrush(badgeBg))
             {
@@ -1438,7 +1542,7 @@ namespace DollyPaste
                 g.DrawString(timeStr, _fontRegular80, timeBrush, rightOffset - timeSize.Width, bounds.Y + 9);
             }
 
-            Rectangle textRect = new Rectangle(bounds.X + 14, bounds.Y + 29, bounds.Width - 28, 21);
+            Rectangle textRect = new Rectangle(contentLeft, bounds.Y + 29, bounds.Right - contentLeft - 14, 21);
             if (item.IsSensitive)
             {
                 using (SolidBrush sensBrush = new SolidBrush(Brand.SensitiveFg))
@@ -1448,7 +1552,9 @@ namespace DollyPaste
             }
             else
             {
-                string snippet = (item.Text ?? "").Replace("\r\n", " ").Replace("\n", " ").Replace("\t", " ");
+                string snippet = item.Text ?? "";
+                if (isImage && snippet.Length > 160) snippet = snippet.Substring(0, 160);
+                snippet = snippet.Replace("\r\n", " ").Replace("\n", " ").Replace("\t", " ");
                 TextRenderer.DrawText(
                     g,
                     snippet,
@@ -1616,6 +1722,10 @@ namespace DollyPaste
                     }
 
                     if (_toolTip != null) _toolTip.Dispose();
+                    Image previewImage = _picImagePreview != null ? _picImagePreview.Image : null;
+                    if (_picImagePreview != null) _picImagePreview.Image = null;
+                    if (previewImage != null) previewImage.Dispose();
+                    ClearImageThumbnails();
                     DisposeCachedFonts();
                 }
             }
@@ -1643,6 +1753,8 @@ namespace DollyPaste
         internal TextBox SearchTextBox { get { return _txtSearch; } }
         internal ListBox ClipsListBox { get { return _listBoxClips; } }
         internal TextBox PreviewTextBox { get { return _txtPreview; } }
+        internal PictureBox ImagePreviewBox { get { return _picImagePreview; } }
+        internal int CachedImageThumbnailCount { get { return _imageThumbnails.Count; } }
         internal Button CopyButton { get { return _btnCopy; } }
         internal Button PinButton { get { return _btnPin; } }
         internal Button DeleteButton { get { return _btnDelete; } }
@@ -1652,6 +1764,7 @@ namespace DollyPaste
         internal Button FilterTextButton { get { return _btnFilterText; } }
         internal Button FilterLinkButton { get { return _btnFilterLink; } }
         internal Button FilterCodeButton { get { return _btnFilterCode; } }
+        internal Button FilterImageButton { get { return _btnFilterImage; } }
         internal Button PreviewToggleButton { get { return _btnPreview; } }
         internal Button NavAllButton { get { return _btnNavAll; } }
         internal Button NavPinnedButton { get { return _btnNavPinned; } }
