@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -16,6 +17,7 @@ namespace DollyPaste
 
         private const uint GMEM_MOVEABLE = 0x0002;
         private const uint CF_BITMAP = 2;
+        private const uint CF_DIB = 8;
         private const uint CF_UNICODETEXT = 13;
 
         private const uint MOD_CONTROL = 0x0002;
@@ -611,6 +613,29 @@ namespace DollyPaste
             return true;
         }
 
+        public bool CopyImage(string pngBase64, Action<uint> onCopied)
+        {
+            if (pngBase64 == null || _disposed) return false;
+            IntPtr ownerHwnd = IntPtr.Zero;
+            if (_owner != null && !_owner.IsDisposed && _owner.IsHandleCreated)
+                ownerHwnd = _owner.Handle;
+
+            uint publishedSequence;
+            if (!ExecuteImagePublication(Win32PublicationNative.Instance, ownerHwnd, pngBase64, out publishedSequence))
+                return false;
+
+            _lastCopiedSequence = publishedSequence;
+            _currentTrackedSequence = publishedSequence;
+            if (onCopied != null)
+            {
+                SafeInvokeOnUI(delegate
+                {
+                    if (!_disposed) onCopied(publishedSequence);
+                });
+            }
+            return true;
+        }
+
         #endregion
 
         #region Publication State Machine & Native Abstraction
@@ -835,6 +860,119 @@ namespace DollyPaste
                 }
                 FreePublicationBuffers(native, ref hHistory, ref hCloud, ref hText);
             }
+        }
+
+        internal static bool ExecuteImagePublication(
+            IClipboardPublicationNative native,
+            IntPtr ownerHwnd,
+            string pngBase64,
+            out uint publishedSequence)
+        {
+            publishedSequence = 0;
+            if (native == null || string.IsNullOrEmpty(pngBase64) || pngBase64.Length > ImagePayload.MaxBase64Chars)
+                return false;
+
+            IntPtr[] handles = new IntPtr[4];
+            bool opened = false;
+            try
+            {
+                byte[] png = Convert.FromBase64String(pngBase64);
+                if (!ImagePayload.HasValidPngHeader(png)) return false;
+                byte[] dib;
+                using (Bitmap image = ImagePayload.Decode(pngBase64))
+                {
+                    if (image == null) return false;
+                    dib = CreateClipboardDib(image);
+                }
+
+                uint history = native.RegisterClipboardFormat("CanIncludeInClipboardHistory");
+                uint cloud = native.RegisterClipboardFormat("CanUploadToCloudClipboard");
+                uint pngFormat = native.RegisterClipboardFormat("PNG");
+                if (history == 0 || cloud == 0 || pngFormat == 0) return false;
+
+                // Preserve the exact PNG (including alpha); provide a standard DIB
+                // fallback for consumers that do not recognize the PNG format.
+                uint[] formats = new uint[] { history, cloud, pngFormat, CF_DIB };
+                byte[][] payloads = new byte[][] { new byte[4], new byte[4], png, dib };
+                for (int i = 0; i < handles.Length; i++)
+                {
+                    handles[i] = AllocatePublicationBuffer(native, payloads[i]);
+                    if (handles[i] == IntPtr.Zero) return false;
+                }
+
+                // Decode, convert, and allocate before touching the user's clipboard.
+                for (int retry = 0; retry < 5; retry++)
+                {
+                    if (native.OpenClipboard(ownerHwnd)) { opened = true; break; }
+                }
+                if (!opened || !native.EmptyClipboard()) return false;
+                for (int i = 0; i < handles.Length; i++)
+                {
+                    // Both exclusion flags must succeed before any image is exposed.
+                    if (native.SetClipboardData(formats[i], handles[i]) == IntPtr.Zero) return false;
+                    handles[i] = IntPtr.Zero; // Ownership transferred to Windows.
+                }
+                publishedSequence = native.GetClipboardSequenceNumber();
+                return true;
+            }
+            catch (Exception) { return false; }
+            finally
+            {
+                if (opened) native.CloseClipboard();
+                foreach (IntPtr handle in handles)
+                    if (handle != IntPtr.Zero) native.FreeGlobal(handle);
+            }
+        }
+
+        private static IntPtr AllocatePublicationBuffer(IClipboardPublicationNative native, byte[] bytes)
+        {
+            IntPtr handle = native.AllocGlobal((uint)bytes.Length);
+            if (handle == IntPtr.Zero) return IntPtr.Zero;
+            try
+            {
+                IntPtr buffer = native.LockGlobal(handle);
+                if (buffer == IntPtr.Zero) return IntPtr.Zero;
+                try { Marshal.Copy(bytes, 0, buffer, bytes.Length); }
+                finally { native.UnlockGlobal(handle); }
+                IntPtr result = handle;
+                handle = IntPtr.Zero;
+                return result;
+            }
+            finally { if (handle != IntPtr.Zero) native.FreeGlobal(handle); }
+        }
+
+        private static byte[] CreateClipboardDib(Bitmap source)
+        {
+            int stride = checked((source.Width * 3 + 3) & ~3);
+            int pixelBytes = checked(stride * source.Height);
+            byte[] dib = new byte[checked(40 + pixelBytes)];
+            // BITMAPINFOHEADER + bottom-up BGR pixels, without a BMP file header.
+            Buffer.BlockCopy(BitConverter.GetBytes(40), 0, dib, 0, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(source.Width), 0, dib, 4, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(source.Height), 0, dib, 8, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes((ushort)1), 0, dib, 12, 2);
+            Buffer.BlockCopy(BitConverter.GetBytes((ushort)24), 0, dib, 14, 2);
+            Buffer.BlockCopy(BitConverter.GetBytes(pixelBytes), 0, dib, 20, 4);
+            using (Bitmap opaque = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb))
+            {
+                using (Graphics graphics = Graphics.FromImage(opaque))
+                {
+                    // BI_RGB has no alpha channel. Flatten onto white instead of
+                    // exposing black/undefined pixels to older bitmap consumers.
+                    graphics.Clear(Color.White);
+                    graphics.DrawImageUnscaled(source, 0, 0);
+                }
+                BitmapData data = opaque.LockBits(new Rectangle(0, 0, opaque.Width, opaque.Height),
+                    ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                try
+                {
+                    for (int y = 0; y < opaque.Height; y++)
+                        Marshal.Copy(IntPtr.Add(data.Scan0, y * data.Stride), dib,
+                            40 + (opaque.Height - y - 1) * stride, opaque.Width * 3);
+                }
+                finally { opaque.UnlockBits(data); }
+            }
+            return dib;
         }
 
         private static void FreePublicationBuffers(IClipboardPublicationNative native, ref IntPtr h1, ref IntPtr h2, ref IntPtr h3)
@@ -1558,6 +1696,7 @@ namespace DollyPaste
 
         internal sealed class ClipboardReadSnapshot : IDisposable
         {
+            internal uint Sequence;
             internal string Text;
             internal byte[] PngBytes;
             internal Bitmap Bitmap;
@@ -1670,6 +1809,7 @@ namespace DollyPaste
                 }
                 if (snapshot.PngBytes == null && snapshot.Bitmap == null && string.IsNullOrEmpty(snapshot.Text)) return null;
                 if (native.GetSequenceNumber() != expectedSequence) return null;
+                snapshot.Sequence = expectedSequence;
                 accepted = true;
                 return snapshot;
             }
@@ -1677,6 +1817,28 @@ namespace DollyPaste
             {
                 if (!accepted) snapshot.Dispose();
             }
+        }
+
+        internal static ClipboardReadSnapshot ReadStableOpenedClipboardPayload(
+            IClipboardCaptureNative native, uint expectedSequence,
+            uint excludeFormat, uint historyFormat, uint pngFormat, bool captureImages)
+        {
+            // Reject notifications that were already stale before we opened the clipboard.
+            if (native.GetSequenceNumber() != expectedSequence) return null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                ClipboardReadSnapshot snapshot = ReadOpenedClipboardPayload(native, expectedSequence,
+                    excludeFormat, historyFormat, pngFormat, captureImages);
+                if (snapshot != null) return snapshot;
+
+                // GetClipboardData can render a delayed format (for example a snip), advancing
+                // the sequence while we hold the clipboard open. Re-read a complete snapshot,
+                // including producer exclusions, instead of dropping the clipboard update.
+                uint renderedSequence = native.GetSequenceNumber();
+                if (renderedSequence == expectedSequence) return null;
+                expectedSequence = renderedSequence;
+            }
+            return null;
         }
 
         private void OnClipboardUpdated()
@@ -1760,7 +1922,7 @@ namespace DollyPaste
                 ClipboardReadSnapshot snapshot;
                 try
                 {
-                    snapshot = ReadOpenedClipboardPayload(Win32CaptureNative.Instance, expectedSeq,
+                    snapshot = ReadStableOpenedClipboardPayload(Win32CaptureNative.Instance, expectedSeq,
                         FormatExcludeFromMonitor, FormatCanIncludeInHistory, attempt == 0 ? FormatPng : 0, _onImageCapture != null);
                 }
                 finally { CloseClipboard(); }
@@ -1768,6 +1930,7 @@ namespace DollyPaste
                 using (snapshot)
                 {
                     if (snapshot == null || _disposed || _paused) return;
+                    expectedSeq = snapshot.Sequence;
                     bool isImage;
                     string value = snapshot.GetValue(out isImage);
                     if (!string.IsNullOrEmpty(value))

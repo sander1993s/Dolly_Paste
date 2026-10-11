@@ -1,3 +1,5 @@
+param([string]$OutputDirectory)
+
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -54,7 +56,11 @@ foreach ($wpfRef in @($refUIAuthClient, $refUIAuthTypes, $refWindowsBase)) {
 }
 
 # 3. Ensure dist directory exists
-$distDir = Join-Path $scriptDir "dist"
+$distDir = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    Join-Path $scriptDir "dist"
+} else {
+    [System.IO.Path]::GetFullPath($OutputDirectory)
+}
 if (-not (Test-Path -LiteralPath $distDir)) {
     [System.IO.Directory]::CreateDirectory($distDir) | Out-Null
 }
@@ -171,6 +177,9 @@ $cscArgs = @(
     "/r:$refUIAuthTypes",
     "/r:$refWindowsBase"
 )
+
+. (Join-Path $scriptDir 'scripts\Get-WindowsOcrReferences.ps1')
+$cscArgs += @(Get-WindowsOcrReferences -FrameworkDirectory $cscDir)
 
 if (Test-Path -LiteralPath $manifestPath) {
     $cscArgs += "/win32manifest:$manifestPath"

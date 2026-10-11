@@ -178,6 +178,22 @@ namespace DollyPaste
         }
     }
 
+    public static class OcrStates
+    {
+        public const string Pending = "pending";
+        public const string Complete = "complete";
+        public const string NoText = "no-text";
+        public const string Unavailable = "unavailable";
+        public const string Failed = "failed";
+        public const int MaxTextChars = 32768;
+
+        internal static bool IsValid(string status)
+        {
+            return status == Pending || status == Complete || status == NoText ||
+                status == Unavailable || status == Failed;
+        }
+    }
+
     public sealed class ClipEntry
     {
         public Guid Id { get; private set; }
@@ -186,6 +202,8 @@ namespace DollyPaste
         public bool IsPinned { get; internal set; }
         public bool IsSensitive { get; internal set; }
         public string Kind { get; private set; }
+        public string OcrText { get; private set; }
+        public string OcrStatus { get; private set; }
 
         public ClipEntry(Guid id, string text, DateTime capturedUtc, bool isPinned, bool isSensitive, string kind)
         {
@@ -195,17 +213,62 @@ namespace DollyPaste
             IsSensitive = isSensitive;
             Kind = string.IsNullOrEmpty(kind) ? "TEXT" : kind;
             Text = isSensitive ? string.Empty : (text ?? string.Empty);
+            OcrText = string.Empty;
+            OcrStatus = !isSensitive && Kind == "IMAGE" ? OcrStates.Pending : string.Empty;
         }
 
         internal ClipEntry Clone()
         {
-            return new ClipEntry(Id, Text, CapturedUtc, IsPinned, IsSensitive, Kind);
+            ClipEntry clone = new ClipEntry(Id, Text, CapturedUtc, IsPinned, IsSensitive, Kind);
+            clone.SetOcrResult(OcrText, OcrStatus);
+            return clone;
+        }
+
+        internal void SetOcrResult(string text, string status)
+        {
+            if (IsSensitive || Kind != "IMAGE")
+            {
+                OcrText = string.Empty;
+                OcrStatus = string.Empty;
+                return;
+            }
+
+            OcrStatus = OcrStates.IsValid(status) ? status : OcrStates.Pending;
+            OcrText = OcrStatus == OcrStates.Complete ? (text ?? string.Empty).Trim() : string.Empty;
+            if (OcrText.Length > OcrStates.MaxTextChars)
+            {
+                int length = OcrStates.MaxTextChars;
+                if (char.IsHighSurrogate(OcrText[length - 1]) && char.IsLowSurrogate(OcrText[length])) length--;
+                OcrText = OcrText.Substring(0, length);
+            }
+            if (OcrStatus == OcrStates.Complete && OcrText.Length == 0) OcrStatus = OcrStates.NoText;
+            if (OcrText.Length > 0)
+            {
+                // Adding OCR must never evict a single otherwise valid large image.
+                int availableBytes = Math.Max(0, HistoryStore.MaxPayloadBytes - Encoding.UTF8.GetByteCount(Text));
+                if (Encoding.UTF8.GetByteCount(OcrText) > availableBytes)
+                {
+                    int low = 0;
+                    int high = OcrText.Length;
+                    while (low < high)
+                    {
+                        int middle = low + (high - low + 1) / 2;
+                        if (Encoding.UTF8.GetByteCount(OcrText.Substring(0, middle)) <= availableBytes) low = middle;
+                        else high = middle - 1;
+                    }
+                    if (low > 0 && char.IsHighSurrogate(OcrText[low - 1])) low--;
+                    OcrText = OcrText.Substring(0, low);
+                    if (OcrText.Length == 0) OcrStatus = OcrStates.Failed;
+                }
+            }
         }
 
         internal void ConvertToTombstone()
         {
             Text = string.Empty;
             IsSensitive = true;
+            OcrText = string.Empty;
+            OcrStatus = string.Empty;
         }
     }
 
@@ -229,6 +292,12 @@ namespace DollyPaste
 
         [DataMember(Name = "kind")]
         public string Kind { get; set; }
+
+        [DataMember(Name = "ocrText", EmitDefaultValue = false)]
+        public string OcrText { get; set; }
+
+        [DataMember(Name = "ocrStatus", EmitDefaultValue = false)]
+        public string OcrStatus { get; set; }
     }
 
     [DataContract]
@@ -256,7 +325,7 @@ namespace DollyPaste
 
         private const int MaxTrackedSequences = 256;
         private const int MaxSuppressionCapacity = 1024;
-        private const int MaxPayloadBytes = 4 * 1024 * 1024; // 4 MiB
+        internal const int MaxPayloadBytes = 4 * 1024 * 1024; // 4 MiB
         private const int MaxTextChars = 32768;
 
         private Settings _settings;
@@ -368,6 +437,71 @@ namespace DollyPaste
         {
             if (!ImagePayload.IsValidBase64(pngBase64)) return null;
             return CapturePayload(pngBase64, sequence, "IMAGE");
+        }
+
+        public ClipEntry GetImageForOcr(Guid id)
+        {
+            ClipEntry result = null;
+            bool stateChanged;
+            lock (_lock)
+            {
+                if (_disposed) return null;
+                stateChanged = PruneLocked();
+                ClipEntry entry = FindImageLocked(id);
+                if (entry != null) result = entry.Clone();
+                if (stateChanged && _settings.PersistHistory) PersistLocked();
+            }
+            if (stateChanged) TriggerChanged();
+            return result;
+        }
+
+        public string GetOcrText(Guid id)
+        {
+            ClipEntry entry = GetImageForOcr(id);
+            return entry != null && entry.OcrStatus == OcrStates.Complete && entry.OcrText.Length > 0
+                ? entry.OcrText : null;
+        }
+
+        // OCR workers hold only an ID: a late result must never recreate a removed,
+        // expired or protected image, or extend the original capture lifetime.
+        public bool SetOcrResult(Guid id, string text, string status)
+        {
+            if (!OcrStates.IsValid(status)) throw new ArgumentException("Unknown OCR status.", "status");
+            bool stateChanged;
+            bool retained = false;
+            lock (_lock)
+            {
+                if (_disposed) return false;
+                stateChanged = PruneLocked();
+                ClipEntry entry = FindImageLocked(id);
+                if (entry != null)
+                {
+                    string previousText = entry.OcrText;
+                    string previousStatus = entry.OcrStatus;
+                    entry.SetOcrResult(text, status);
+                    stateChanged |= previousText != entry.OcrText || previousStatus != entry.OcrStatus;
+                    if (entry.OcrText.Length > 0 && _sensitiveFingerprints.Contains(ComputeFingerprint(entry.OcrText)))
+                    {
+                        stateChanged |= ScrubFingerprint(ComputeFingerprint(entry.OcrText));
+                    }
+                    stateChanged |= PruneLocked();
+                    retained = FindImageLocked(id) != null;
+                }
+                if (stateChanged && _settings.PersistHistory) PersistLocked();
+            }
+            if (stateChanged) TriggerChanged();
+            return retained;
+        }
+
+        private ClipEntry FindImageLocked(Guid id)
+        {
+            for (int i = 0; i < _entries.Count; i++)
+            {
+                ClipEntry entry = _entries[i];
+                if (entry.Id == id && !entry.IsSensitive && entry.Kind == "IMAGE" && entry.Text.Length > 0)
+                    return entry;
+            }
+            return null;
         }
 
         private ClipEntry CapturePayload(string text, uint sequence, string kind)
@@ -495,9 +629,21 @@ namespace DollyPaste
 
         public void TrackRestored(Guid id, uint sequence)
         {
+            TrackRestoredPayload(id, sequence, false);
+        }
+
+        public void TrackRestoredOcr(Guid id, uint sequence)
+        {
+            TrackRestoredPayload(id, sequence, true);
+        }
+
+        private void TrackRestoredPayload(Guid id, uint sequence, bool useOcrText)
+        {
             bool stateChanged = false;
             lock (_lock)
             {
+                if (_disposed) return;
+                stateChanged = PruneLocked();
                 if (sequence > _maxObservedSequence)
                 {
                     _maxObservedSequence = sequence;
@@ -513,21 +659,20 @@ namespace DollyPaste
                     }
                 }
 
-                if (entry == null || entry.IsSensitive || string.IsNullOrEmpty(entry.Text))
+                string text = entry == null || entry.IsSensitive ? null :
+                    (useOcrText ? (entry.OcrStatus == OcrStates.Complete ? entry.OcrText : null) : entry.Text);
+                if (!string.IsNullOrEmpty(text))
                 {
-                    return;
-                }
-
-                string fingerprint = ComputeFingerprint(entry.Text);
-
-                if (_pendingProtectedSequences.Contains(sequence))
-                {
-                    _pendingProtectedSequences.Remove(sequence);
-                    stateChanged = ScrubFingerprint(fingerprint);
-                }
-                else
-                {
-                    RecordSequenceFingerprint(sequence, fingerprint);
+                    string fingerprint = ComputeFingerprint(text);
+                    if (_pendingProtectedSequences.Contains(sequence))
+                    {
+                        _pendingProtectedSequences.Remove(sequence);
+                        stateChanged |= ScrubFingerprint(fingerprint);
+                    }
+                    else
+                    {
+                        RecordSequenceFingerprint(sequence, fingerprint);
+                    }
                 }
 
                 if (stateChanged && _settings.PersistHistory)
@@ -848,28 +993,40 @@ namespace DollyPaste
                 return false;
             }
 
-            if (!_sensitiveFingerprints.Contains(fingerprint))
-            {
-                if (_sensitiveFingerprints.Count >= MaxSuppressionCapacity)
-                {
-                    _captureSuspended = true;
-                    _storageWarning = "Suppression capacity reached; clipboard capture suspended.";
-                }
-                else
-                {
-                    _sensitiveFingerprints.Add(fingerprint);
-                }
-            }
-
             bool changed = false;
-
-            for (int i = _entries.Count - 1; i >= 0; i--)
+            Queue<string> pending = new Queue<string>();
+            HashSet<string> visited = new HashSet<string>(StringComparer.Ordinal);
+            pending.Enqueue(fingerprint);
+            while (pending.Count > 0)
             {
-                ClipEntry entry = _entries[i];
-                if (!entry.IsSensitive && !string.IsNullOrEmpty(entry.Text))
+                string current = pending.Dequeue();
+                if (!visited.Add(current)) continue;
+                if (!_sensitiveFingerprints.Contains(current))
                 {
-                    if (string.Equals(ComputeFingerprint(entry.Text), fingerprint, StringComparison.Ordinal))
+                    if (_sensitiveFingerprints.Count >= MaxSuppressionCapacity)
                     {
+                        _captureSuspended = true;
+                        _storageWarning = "Suppression capacity reached; clipboard capture suspended.";
+                    }
+                    else
+                    {
+                        _sensitiveFingerprints.Add(current);
+                    }
+                }
+
+                for (int i = _entries.Count - 1; i >= 0; i--)
+                {
+                    ClipEntry entry = _entries[i];
+                    if (entry.IsSensitive || string.IsNullOrEmpty(entry.Text)) continue;
+                    string payloadFingerprint = ComputeFingerprint(entry.Text);
+                    string ocrFingerprint = string.IsNullOrEmpty(entry.OcrText) ? null : ComputeFingerprint(entry.OcrText);
+                    if (string.Equals(payloadFingerprint, current, StringComparison.Ordinal) ||
+                        string.Equals(ocrFingerprint, current, StringComparison.Ordinal))
+                    {
+                        // Image bytes and extracted text are two representations of
+                        // the same retained content; protection must scrub both.
+                        pending.Enqueue(payloadFingerprint);
+                        if (ocrFingerprint != null) pending.Enqueue(ocrFingerprint);
                         if (_settings.SensitiveBehavior == SensitiveBehavior.Discard)
                         {
                             _entries.RemoveAt(i);
@@ -959,7 +1116,7 @@ namespace DollyPaste
                 {
                     if (!_entries[i].IsPinned)
                     {
-                        currentBytes -= Encoding.UTF8.GetByteCount(_entries[i].Text);
+                        currentBytes -= GetPayloadBytes(_entries[i]);
                         _entries.RemoveAt(i);
                         changed = true;
                     }
@@ -969,7 +1126,7 @@ namespace DollyPaste
                 while (_entries.Count > 0 && currentBytes > MaxPayloadBytes)
                 {
                     int lastIdx = _entries.Count - 1;
-                    currentBytes -= Encoding.UTF8.GetByteCount(_entries[lastIdx].Text);
+                    currentBytes -= GetPayloadBytes(_entries[lastIdx]);
                     _entries.RemoveAt(lastIdx);
                     changed = true;
                 }
@@ -985,10 +1142,15 @@ namespace DollyPaste
             {
                 if (!_entries[i].IsSensitive && !string.IsNullOrEmpty(_entries[i].Text))
                 {
-                    total += Encoding.UTF8.GetByteCount(_entries[i].Text);
+                    total += GetPayloadBytes(_entries[i]);
                 }
             }
             return total;
+        }
+
+        private static int GetPayloadBytes(ClipEntry entry)
+        {
+            return Encoding.UTF8.GetByteCount(entry.Text) + Encoding.UTF8.GetByteCount(entry.OcrText);
         }
 
         private void TriggerChanged()
@@ -1107,7 +1269,9 @@ namespace DollyPaste
                                 kind = DetermineKind(text);
                             }
 
-                            loaded.Add(new ClipEntry(r.Id, text, r.CapturedUtc, r.IsPinned, r.IsSensitive, kind));
+                            ClipEntry entry = new ClipEntry(r.Id, text, r.CapturedUtc, r.IsPinned, r.IsSensitive, kind);
+                            entry.SetOcrResult(r.OcrText, r.OcrStatus);
+                            loaded.Add(entry);
                         }
                     }
                 }
@@ -1153,6 +1317,8 @@ namespace DollyPaste
                     r.IsPinned = e.IsPinned;
                     r.IsSensitive = e.IsSensitive;
                     r.Kind = e.Kind;
+                    r.OcrText = e.IsSensitive || e.Kind != "IMAGE" ? null : e.OcrText;
+                    r.OcrStatus = e.IsSensitive || e.Kind != "IMAGE" ? null : e.OcrStatus;
                     dto.Records.Add(r);
                 }
 

@@ -205,9 +205,12 @@ namespace DollyPaste
                         using (Graphics graphics = Graphics.FromImage(sampleImage))
                         {
                             graphics.Clear(Brand.WarmWoolCanvas);
-                            Brand.DrawSheep(graphics, new RectangleF(28, 8, 64, 64));
+                            Brand.DrawSheep(graphics, new RectangleF(32, 0, 56, 56));
+                            using (Font labelFont = new Font("Segoe UI", 10))
+                                graphics.DrawString("Dolly Paste", labelFont, Brushes.Black, 20, 59);
                         }
-                        history.CaptureImage(ImagePayload.EncodePng(sampleImage), 5);
+                        ClipEntry demoImage = history.CaptureImage(ImagePayload.EncodePng(sampleImage), 5);
+                        history.SetOcrResult(demoImage.Id, "Dolly Paste", OcrStates.Complete);
                     }
 
                     // Demo/preview never instantiates WindowsClipboard or touches system clipboard
@@ -300,6 +303,7 @@ namespace DollyPaste
                 {
                     MainForm form = null;
                     WindowsClipboard clipboard = null;
+                    OcrHistoryProcessor ocr = null;
                     try
                     {
                         form = new MainForm(history, null, dataDir, false, false, null);
@@ -307,10 +311,17 @@ namespace DollyPaste
                         clipboard = CreateClipboard(form, history, false);
 
                         form.SetClipboard(clipboard);
+                        ocr = new OcrHistoryProcessor(history, new WindowsOcrEngine(), delegate(Action action)
+                        {
+                            if (form.IsDisposed || !form.IsHandleCreated) return;
+                            try { form.BeginInvoke(action); }
+                            catch (InvalidOperationException) { }
+                        });
                         Application.Run(form);
                     }
                     finally
                     {
+                        if (ocr != null) ocr.Dispose();
                         if (clipboard != null)
                         {
                             clipboard.Dispose();

@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace DollyPaste.Tests
@@ -64,7 +65,7 @@ namespace DollyPaste.Tests
                             Rectangle mainWorkArea = (mainScreen != null) ? mainScreen.WorkingArea : Screen.PrimaryScreen.WorkingArea;
 
                             Size expectedMainInit, expectedMainMin;
-                            MainForm.ClampWindowSize(mainWorkArea, new Size(420, 520), new Size(380, 420), out expectedMainInit, out expectedMainMin);
+                            MainForm.ClampWindowSize(mainWorkArea, new Size(480, 520), new Size(420, 460), out expectedMainInit, out expectedMainMin);
 
                             AssertEqual(expectedMainInit.Width, form.Size.Width,
                                 "MainForm actual outer width must match clamped initial width (not inflated by client chrome)");
@@ -113,6 +114,64 @@ namespace DollyPaste.Tests
                                     "SettingsDialog MinimumSize width must match clamped min width");
                                 AssertEqual(expectedDlgMin.Height, dlg.MinimumSize.Height,
                                     "SettingsDialog MinimumSize height must match clamped min height");
+                            }
+                        }, ref failureCount);
+
+                        RunTest("Blueprint Title Bar and Bottom-Right Window Controls", delegate
+                        {
+                            AssertTrue(form.FormBorderStyle == FormBorderStyle.None,
+                                "The sheep title bar must replace the duplicated native window caption");
+                            AssertTrue(form.HeaderPanel.BackColor.ToArgb() == Color.FromArgb(1, 82, 154).ToArgb(),
+                                "The title bar must use the SSS Blueprint blue");
+                            AssertTrue(form.HeaderTitleLabel.ForeColor.ToArgb() == Color.White.ToArgb(),
+                                "The title must remain readable on the blue bar");
+                            AssertEqual(1, CountVisibleTitleLabels(form), "Dolly Paste must have one visible title");
+                            AssertNoBrandTagline(form);
+                            AssertTrue(form.HeaderPanel.ClientRectangle.Contains(form.HeaderSheepBounds),
+                                "The sheep must fit within the title bar");
+                            AssertTrue(form.HeaderSheepBounds.Width >= 24 && form.HeaderSheepBounds.Height >= 24,
+                                "The title-bar sheep must remain recognizable");
+                            AssertTrue(form.HeaderSheepBounds.Right < form.HeaderTitleLabel.Left,
+                                "The sheep must precede the title without touching it");
+                            AssertTrue(form.CloseButton.Parent == form.HeaderPanel,
+                                "The close button must share the title bar with the sheep");
+                            AssertTrue(form.CloseButton.Width >= 30 && form.CloseButton.Height >= 30,
+                                "The close button must have a usable click target");
+                            Rectangle closeInWindow = form.RectangleToClient(form.CloseButton.RectangleToScreen(form.CloseButton.ClientRectangle));
+                            AssertTrue(closeInWindow.Top >= 8 &&
+                                       form.HeaderPanel.ClientSize.Height - form.CloseButton.Bottom >= 4 &&
+                                       form.ClientSize.Width - closeInWindow.Right >= 8,
+                                "The close button must have padding above, below and at the window edge");
+                            AssertTrue(form.PauseResumeButton.Parent == form.StatusBarPanel &&
+                                       form.SettingsButton.Parent == form.StatusBarPanel,
+                                "Pause and settings must live in the bottom bar");
+                            AssertTrue(form.PauseResumeButton.Left > form.StatusBarPanel.ClientSize.Width / 2 &&
+                                       form.SettingsButton.Left > form.PauseResumeButton.Right,
+                                "Pause and settings must occupy the bottom right in that order");
+                            VerifyMainFormLayout(form);
+                            form.CloseButton.PerformClick();
+                            ProcessEvents();
+                            AssertTrue(!form.Visible && !form.IsDisposed,
+                                "The padded close action must hide the popup without shutting down clipboard history");
+                            form.Show();
+                            ProcessEvents();
+                        }, ref failureCount);
+
+                        RunTest("Borderless Window Retains Edge and Corner Resizing", delegate
+                        {
+                            Size[] sizes = new Size[] { new Size(480, 520), new Size(420, 460) };
+                            foreach (Size size in sizes)
+                            {
+                                AssertEqual(13, MainForm.GetFrameHitTest(new Point(0, 0), size), "Top-left corner must resize both edges");
+                                AssertEqual(14, MainForm.GetFrameHitTest(new Point(size.Width - 1, 0), size), "Top-right corner must resize both edges");
+                                AssertEqual(16, MainForm.GetFrameHitTest(new Point(0, size.Height - 1), size), "Bottom-left corner must resize both edges");
+                                AssertEqual(17, MainForm.GetFrameHitTest(new Point(size.Width - 1, size.Height - 1), size), "Bottom-right corner must resize both edges");
+                                AssertEqual(10, MainForm.GetFrameHitTest(new Point(0, size.Height / 2), size), "Left edge must resize horizontally");
+                                AssertEqual(11, MainForm.GetFrameHitTest(new Point(size.Width - 1, size.Height / 2), size), "Right edge must resize horizontally");
+                                AssertEqual(12, MainForm.GetFrameHitTest(new Point(size.Width / 2, 0), size), "Top edge must resize vertically");
+                                AssertEqual(15, MainForm.GetFrameHitTest(new Point(size.Width / 2, size.Height - 1), size), "Bottom edge must resize vertically");
+                                AssertEqual(1, MainForm.GetFrameHitTest(new Point(5, 5), size), "Resize perimeter must not cover the inset app controls");
+                                AssertEqual(1, MainForm.GetFrameHitTest(new Point(size.Width / 2, size.Height / 2), size), "Content must remain an ordinary client area");
                             }
                         }, ref failureCount);
 
@@ -210,9 +269,9 @@ namespace DollyPaste.Tests
                         }, ref failureCount);
 
                         // 4. Compact layout and optional preview at the default size.
-                        RunTest("Compact Layout and Optional Preview at Default Size (420x520)", delegate
+                        RunTest("Compact Layout and Optional Preview at Default Size (480x520)", delegate
                         {
-                            form.Size = new Size(420, 520);
+                            form.Size = new Size(480, 520);
                             form.TestSelectClip(0);
                             form.PerformLayout();
                             ProcessEvents();
@@ -234,10 +293,10 @@ namespace DollyPaste.Tests
                         }, ref failureCount);
 
                         // 5. Minimum size must preserve usable list space even with the preview open.
-                        RunTest("Compact Layout and Optional Preview at Minimum Size (380x420)", delegate
+                        RunTest("Compact Layout and Optional Preview at Minimum Size (420x460)", delegate
                         {
                             if (form.DetailPanel.Visible) form.PreviewToggleButton.PerformClick();
-                            form.Size = new Size(380, 420);
+                            form.Size = new Size(420, 460);
                             form.TestSelectClip(0);
                             form.PerformLayout();
                             ProcessEvents();
@@ -354,7 +413,7 @@ namespace DollyPaste.Tests
                             AssertTrue(form.DetailToolbarPanel.Visible, "Clip actions must remain available without a preview");
 
                             // Restore normal size for remaining tests
-                            form.Size = new Size(420, 520);
+                            form.Size = new Size(480, 520);
                             form.PerformLayout();
                             ProcessEvents();
                         }, ref failureCount);
@@ -690,22 +749,29 @@ namespace DollyPaste.Tests
                                 imageForm.FilterImageButton.PerformClick();
                                 AssertEqual(1, imageForm.ClipsListBox.Items.Count, "Images filter must isolate image clips");
                                 AssertTrue(imageForm.DetailKindLabel.Text == "IMAGE", "Image entry must have an IMAGE label");
-                                AssertTrue(imageForm.PreviewTextBox.Text == imageBase64, "Preview must retain the entire raw PNG base64 value");
+                                AssertTrue(imageForm.PreviewTextBox.Text == imageBase64, "Left preview must retain the entire raw PNG base64 value");
+                                AssertTrue(imageForm.OcrPreviewTextBox.Text.Contains("Reading text"), "Right preview must initially explain that text recognition is pending");
+                                AssertTrue(!imageForm.CopyImageTextButton.Enabled, "Text copy must be unavailable before OCR finishes");
                                 AssertTrue(imageForm.ImagePreviewBox.Image != null, "Image entry must decode a visual preview");
                                 AssertTrue(imageForm.ImagePreviewBox.Image.Width <= 240 && imageForm.ImagePreviewBox.Image.Height <= 240,
                                     "Image preview must retain only a bounded thumbnail");
 
                                 imageForm.PreviewToggleButton.PerformClick();
                                 ProcessEvents();
+                                AssertTrue(imageForm.PreviewTextBox.Text == imageBase64, "Base64 preview must retain the entire raw PNG value");
+                                AssertTrue(!imageForm.PreviewTextBox.WordWrap && imageForm.PreviewTextBox.ScrollBars == ScrollBars.Both,
+                                    "Base64 must scroll without expensive wrapping of a large unbroken value");
+                                AssertTrue(imageForm.OcrPreviewTextBox.WordWrap, "Recognized text must retain normal readable wrapping");
                                 AssertTrue(imageForm.ImagePreviewBox.Visible, "Expanded preview must show the image");
                                 AssertTrue(imageForm.PreviewTextBox.Left >= imageForm.ImagePreviewBox.Parent.Right,
                                     "Base64 value must appear beside the image");
                                 VerifyMainFormLayout(imageForm);
-                                imageForm.Size = new Size(380, 420);
+                                imageForm.Size = new Size(420, 460);
                                 ProcessEvents();
                                 VerifyMainFormLayout(imageForm);
                                 AssertTrue(imageForm.PreviewTextBox.Width > 100, "Base64 value must remain readable at minimum size");
-                                AssertTrue(imageForm.ImagePreviewBox.Height >= 64, "Image preview must remain visible at minimum size");
+                                AssertTrue(imageForm.ImagePreviewBox.Height >= 64,
+                                    "Image preview must remain visible at minimum size (actual height " + imageForm.ImagePreviewBox.Height + ")");
                                 AssertTrue(imageForm.ListContainerPanel.Height >= imageForm.ClipsListBox.ItemHeight,
                                     "Expanded image preview must preserve at least one full clipboard row");
 
@@ -713,13 +779,15 @@ namespace DollyPaste.Tests
                                     imageForm.DrawToBitmap(rendered, new Rectangle(Point.Empty, rendered.Size));
                                 AssertEqual(1, imageForm.CachedImageThumbnailCount, "Painting must cache the image thumbnail");
                                 imageForm.CopyButton.PerformClick();
-                                AssertTrue(GetToast(imageForm).Text.Contains("copy simulated"), "Image copy must use the guarded clipboard-free demo route");
+                                AssertTrue(GetToast(imageForm).Text.Contains("image copy simulated"), "An image entry must copy the image by default through the guarded demo route");
                                 AssertTrue(imageHistory.GetText(imageEntry.Id) == imageBase64, "Copy must preserve the full base64 payload");
 
                                 Image oldPreview = imageForm.ImagePreviewBox.Image;
                                 imageForm.FilterTextButton.PerformClick();
                                 AssertEqual(1, imageForm.ClipsListBox.Items.Count, "Text filter must exclude images");
                                 AssertTrue(imageForm.ImagePreviewBox.Image == null, "Selecting text must clear the image preview");
+                                AssertTrue(imageForm.PreviewTextBox.WordWrap && imageForm.PreviewTextBox.ScrollBars == ScrollBars.Vertical,
+                                    "Selecting ordinary text must restore wrapped text preview");
                                 AssertImageDisposed(oldPreview, "Selecting text must dispose the previous image preview");
                                 imageForm.FilterImageButton.PerformClick();
                                 oldPreview = imageForm.ImagePreviewBox.Image;
@@ -736,6 +804,340 @@ namespace DollyPaste.Tests
                                 imageForm.Dispose();
                                 AssertEqual(0, imageForm.CachedImageThumbnailCount, "Disposing the form must release cached thumbnails");
                                 AssertImageDisposed(oldPreview, "Disposing the form must release its selected image preview");
+                            }
+                        }
+                    }, ref failureCount);
+
+                    RunTest("Image OCR Completion, Search and Distinct Copy Actions", delegate
+                    {
+                        string ocrDirectory = Path.Combine(tempDir, "OcrUi_" + Guid.NewGuid().ToString("N"));
+                        string imageBase64 = CreateSyntheticImageBase64();
+                        string recognizedText = "Synthetic receipt\nTotal: 42.00";
+                        using (HistoryStore ocrHistory = new HistoryStore(settings, ocrDirectory))
+                        {
+                            ClipEntry imageEntry = ocrHistory.CaptureImage(imageBase64, 8101);
+                            using (MainForm ocrForm = new MainForm(ocrHistory, null, ocrDirectory, true, false, null))
+                            {
+                                ocrForm.ShowInTaskbar = false;
+                                ocrForm.StartPosition = FormStartPosition.Manual;
+                                ocrForm.Location = new Point(-20000, -20000);
+                                ocrForm.Show();
+                                ProcessEvents();
+                                ocrForm.PreviewToggleButton.PerformClick();
+                                AssertTrue(ocrForm.OcrPreviewTextBox.Text.Contains("Reading text"), "Pending status must be readable beside base64");
+                                AssertTrue(ocrForm.PreviewTextBox.Text == imageBase64, "Pending OCR must preserve the simultaneous base64 preview");
+                                AssertTrue(!ocrForm.CopyImageTextButton.Enabled, "Pending OCR must disable Copy text");
+                                AssertTrue(ocrForm.CopyButton.Enabled, "Pending OCR must leave image copying available");
+
+                                ocrForm.TestApplySearch("receipt");
+                                AssertEqual(0, ocrForm.ClipsListBox.Items.Count, "Pending image must not match uncaptured OCR text");
+                                AssertTrue(ocrHistory.SetOcrResult(imageEntry.Id, recognizedText, OcrStates.Complete), "Synthetic OCR completion must be accepted");
+                                ProcessEvents();
+                                AssertEqual(1, ocrForm.ClipsListBox.Items.Count, "OCR completion must refresh an active search without manual reload");
+                                AssertTrue(ocrForm.OcrPreviewTextBox.Text == recognizedText.Replace("\n", "\r\n"), "Right text preview must render recognized lines with native Windows newlines");
+                                AssertTrue(ocrForm.PreviewTextBox.Text == imageBase64, "Left preview must keep base64 visible alongside recognized text");
+                                AssertTrue(ocrForm.CopyImageTextButton.Enabled, "Recognized text must enable its copy action");
+                                AssertTrue(ocrForm.OcrPreviewTextBox.AccessibleName == "Extracted image text", "OCR preview must have an accessible name");
+                                AssertTrue(ocrForm.CopyButton.Text == "Copy image", "New image selections must default to the actual image");
+
+                                ocrForm.CopyImageTextButton.PerformClick();
+                                AssertTrue(GetToast(ocrForm).Text.Contains("text copy simulated"), "OCR copy must use its guarded clipboard-free action");
+                                AssertTrue(ocrForm.SelectedImageCopyTarget == ImageCopyTarget.OcrText,
+                                    "The explicit OCR preview action must select the text target");
+                                AssertTrue(ocrHistory.GetOcrText(imageEntry.Id) == recognizedText, "OCR copy must leave the source text intact");
+                                AssertTrue(ocrHistory.GetText(imageEntry.Id) == imageBase64, "OCR must preserve original image base64");
+                                AssertEqual(1, ocrHistory.Snapshot().Count, "A simulated text copy must not create another history item");
+
+                                GetToast(ocrForm).Text = "";
+                                PressTextBoxKey(ocrForm.OcrPreviewTextBox, Keys.Control | Keys.C);
+                                AssertTrue(GetToast(ocrForm).Text.Contains("text copy simulated"),
+                                    "Ctrl+C in the OCR preview must route the selected text target");
+                                GetToast(ocrForm).Text = "";
+                                ocrForm.Activate();
+                                ocrForm.ClipsListBox.Focus();
+                                PressKey(ocrForm, Keys.Enter);
+                                AssertTrue(GetToast(ocrForm).Text.Contains("text copy simulated"),
+                                    "Enter must copy the selected OCR target");
+
+                                GetToast(ocrForm).Text = "";
+                                ocrForm.CopyImageBase64Button.PerformClick();
+                                AssertTrue(GetToast(ocrForm).Text.Contains("Base64 copy simulated"),
+                                    "The left column must provide the guarded base64 copy action");
+                                AssertTrue(ocrForm.SelectedImageCopyTarget == ImageCopyTarget.Base64,
+                                    "The explicit base64 preview action must select the base64 target");
+                                AssertTrue(ocrForm.CopyImageTextButton.Enabled, "The right column must keep its separate text copy action");
+                                VerifyMainFormLayout(ocrForm);
+                                ocrForm.Size = new Size(420, 460);
+                                ProcessEvents();
+                                VerifyMainFormLayout(ocrForm);
+                                AssertTrue(ocrForm.OcrPreviewTextBox.Width > 100 && ocrForm.OcrPreviewTextBox.Height >= 64,
+                                    "OCR preview must remain readable at minimum size (actual " + ocrForm.OcrPreviewTextBox.Size + ")");
+
+                                ocrHistory.Protect(8101);
+                                ProcessEvents();
+                                AssertEqual(0, ocrForm.ClipsListBox.Items.Count, "Protected images must no longer match their former OCR text");
+                                AssertTrue(!ocrForm.CopyImageTextButton.Enabled, "Protected or removed images must disable Copy text");
+                                AssertTrue(!ocrForm.OcrPreviewTextBox.Text.Contains("Synthetic receipt"), "Protected OCR must leave no text in the preview");
+                            }
+                        }
+                    }, ref failureCount);
+
+                    RunTest("Image OCR No Text, Unavailable and Failed States", delegate
+                    {
+                        string[] statuses = new string[] { OcrStates.NoText, OcrStates.Unavailable, OcrStates.Failed };
+                        string[] messages = new string[] { "No text found", "Text recognition is unavailable", "Text recognition could not finish" };
+                        for (int stateIndex = 0; stateIndex < statuses.Length; stateIndex++)
+                        {
+                            string stateDirectory = Path.Combine(tempDir, "OcrState_" + Guid.NewGuid().ToString("N"));
+                            string imageBase64 = CreateSyntheticImageBase64();
+                            using (HistoryStore stateHistory = new HistoryStore(settings, stateDirectory))
+                            {
+                                ClipEntry imageEntry = stateHistory.CaptureImage(imageBase64, (uint)(8200 + stateIndex));
+                                using (MainForm stateForm = new MainForm(stateHistory, null, stateDirectory, true, false, null))
+                                {
+                                    stateForm.ShowInTaskbar = false;
+                                    stateForm.StartPosition = FormStartPosition.Manual;
+                                    stateForm.Location = new Point(-20000, -20000);
+                                    stateForm.Show();
+                                    stateForm.PreviewToggleButton.PerformClick();
+                                    AssertTrue(stateHistory.SetOcrResult(imageEntry.Id, null, statuses[stateIndex]), "Synthetic terminal status must be accepted");
+                                    ProcessEvents();
+                                    AssertTrue(stateForm.OcrPreviewTextBox.Text.Contains(messages[stateIndex]), "OCR status must explain why extracted text is absent");
+                                    AssertTrue(!stateForm.CopyImageTextButton.Enabled, "OCR without text must disable Copy text");
+                                    AssertTrue(stateForm.CopyButton.Enabled, "OCR failure or no text must leave image copy available");
+                                    AssertTrue(stateForm.PreviewTextBox.Text == imageBase64, "Images without OCR must retain their base64 preview");
+                                    stateForm.Size = new Size(420, 460);
+                                    ProcessEvents();
+                                    VerifyMainFormLayout(stateForm);
+                                }
+                            }
+                        }
+                    }, ref failureCount);
+
+                    RunTest("Image Row Target Clicks, Arrow Navigation and Selection Reset", delegate
+                    {
+                        string targetDirectory = Path.Combine(tempDir, "ImageTargets_" + Guid.NewGuid().ToString("N"));
+                        using (HistoryStore targetHistory = new HistoryStore(settings, targetDirectory))
+                        {
+                            ClipEntry link = targetHistory.Capture("https://example.com/blueprint", 8299);
+                            ClipEntry code = targetHistory.Capture("function blueprint() { return true; }", 8300);
+                            ClipEntry text = targetHistory.Capture("Ordinary text target", 8301);
+                            ClipEntry ready = targetHistory.CaptureImage(CreateSyntheticImageBase64(), 8302);
+                            targetHistory.SetOcrResult(ready.Id, "Readable image text", OcrStates.Complete);
+                            ClipEntry pending = targetHistory.CaptureImage(CreateSyntheticImageBase64(2027), 8303);
+                            using (MainForm targetForm = new MainForm(targetHistory, null, targetDirectory, true, false, null))
+                            {
+                                ShowTestForm(targetForm);
+                                ClipEntry[] expectedOrder = new ClipEntry[] { pending, ready, text, code, link };
+                                AssertClipOrder(targetForm, expectedOrder, "Initial newest-first history");
+                                VerifyFullWidthClipRows(targetForm);
+                                AssertTarget(targetForm, ImageCopyTarget.Image, "Copy image", "Initial image selection");
+                                VerifyImageTargetLayout(targetForm, 0, false);
+                                VerifyImageTargetLayout(targetForm, 1, true);
+
+                                ClickImageTarget(targetForm, 1, ImageCopyTarget.OcrText);
+                                AssertTrue(((ClipEntry)targetForm.ClipsListBox.SelectedItem).Id == ready.Id,
+                                    "Clicking an OCR region on another row must first select that row");
+                                AssertTarget(targetForm, ImageCopyTarget.OcrText, "Copy text", "OCR region click");
+                                AssertClipOrder(targetForm, expectedOrder, "Selecting an image below the first row");
+                                ClickImageTarget(targetForm, 1, ImageCopyTarget.Base64);
+                                AssertTarget(targetForm, ImageCopyTarget.Base64, "Copy Base64", "Base64 region click");
+                                GetToast(targetForm).Text = "";
+                                var doubleClick = typeof(Control).GetMethod("OnDoubleClick",
+                                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                                doubleClick.Invoke(targetForm.ClipsListBox, new object[] { EventArgs.Empty });
+                                AssertTrue(GetToast(targetForm).Text.Contains("Base64 copy simulated"),
+                                    "Double-clicking a format must copy the format selected by its mouse-down");
+                                ClickImageTarget(targetForm, 1, ImageCopyTarget.Image);
+                                AssertTarget(targetForm, ImageCopyTarget.Image, "Copy image", "Image region click");
+
+                                FocusPicker(targetForm);
+                                AssertTrue(PressKey(targetForm, Keys.Right), "Right on an image row must be handled");
+                                AssertTarget(targetForm, ImageCopyTarget.OcrText, "Copy text", "Right from image");
+                                PressKey(targetForm, Keys.Right);
+                                AssertTarget(targetForm, ImageCopyTarget.Base64, "Copy Base64", "Right from OCR");
+                                PressKey(targetForm, Keys.Right);
+                                AssertTarget(targetForm, ImageCopyTarget.Base64, "Copy Base64", "Right boundary");
+                                PressKey(targetForm, Keys.Left);
+                                AssertTarget(targetForm, ImageCopyTarget.OcrText, "Copy text", "Left from base64");
+                                PressKey(targetForm, Keys.Left);
+                                AssertTarget(targetForm, ImageCopyTarget.Image, "Copy image", "Left from OCR");
+                                PressKey(targetForm, Keys.Left);
+                                AssertTarget(targetForm, ImageCopyTarget.Image, "Copy image", "Left boundary");
+
+                                targetForm.SelectImageCopyTarget(ImageCopyTarget.Base64);
+                                PressListArrow(targetForm, Keys.Up);
+                                AssertTrue(((ClipEntry)targetForm.ClipsListBox.SelectedItem).Id == pending.Id,
+                                    "Up must move to the preceding image row");
+                                AssertTarget(targetForm, ImageCopyTarget.Image, "Copy image", "Moving to another row");
+                                PressKey(targetForm, Keys.Right);
+                                AssertTarget(targetForm, ImageCopyTarget.Base64, "Copy Base64", "Pending OCR must be skipped");
+                                PressKey(targetForm, Keys.Left);
+                                AssertTarget(targetForm, ImageCopyTarget.Image, "Copy image", "Left must skip pending OCR");
+                                AssertTrue(!targetForm.SelectImageCopyTarget(ImageCopyTarget.OcrText),
+                                    "Pending OCR cannot be selected through another input path");
+                                PressListArrow(targetForm, Keys.Down);
+                                AssertTarget(targetForm, ImageCopyTarget.Image, "Copy image", "Down to a completed image");
+                                AssertClipOrder(targetForm, expectedOrder, "Image target and vertical arrow navigation");
+
+                                // A single vertical history order is shared by every content type.
+                                // Horizontal movement is reserved for representations of images.
+                                for (int plainIndex = 2; plainIndex < expectedOrder.Length; plainIndex++)
+                                {
+                                    PressListArrow(targetForm, Keys.Down);
+                                    AssertEqual(plainIndex, targetForm.ClipsListBox.SelectedIndex,
+                                        "Down must visit the next full-width row regardless of content type");
+                                    ClipEntry plain = (ClipEntry)targetForm.ClipsListBox.SelectedItem;
+                                    AssertTrue(plain.Id == expectedOrder[plainIndex].Id,
+                                        "Vertical navigation must preserve the displayed history order");
+                                    AssertTrue(PressKey(targetForm, Keys.Left) && PressKey(targetForm, Keys.Right),
+                                        "The picker must suppress native horizontal navigation for text, code and links");
+                                    AssertTrue(targetForm.SelectedImageCopyTarget == ImageCopyTarget.Image &&
+                                               targetForm.CopyButton.Text == "Copy text",
+                                        "Left and Right must not select image formats for text, code or links");
+                                    AssertTrue(targetForm.GetImageTargetBounds(plainIndex, ImageCopyTarget.Image).IsEmpty &&
+                                               targetForm.GetImageTargetBounds(plainIndex, ImageCopyTarget.OcrText).IsEmpty &&
+                                               targetForm.GetImageTargetBounds(plainIndex, ImageCopyTarget.Base64).IsEmpty,
+                                        "Non-image clips must not expose image format hit regions");
+                                    AssertEqual(plainIndex, targetForm.ClipsListBox.SelectedIndex,
+                                        "Horizontal keys must not change the selected non-image clip");
+                                    AssertClipOrder(targetForm, expectedOrder, "Selecting " + plain.Kind);
+                                    VerifyFullWidthClipRows(targetForm);
+                                }
+                                PressListArrow(targetForm, Keys.Up);
+                                AssertEqual(3, targetForm.ClipsListBox.SelectedIndex,
+                                    "Up must return to the preceding code row");
+                                targetForm.TestRefresh();
+                                ProcessEvents();
+                                AssertClipOrder(targetForm, expectedOrder, "Refreshing the selected non-image row");
+                                targetForm.TestSelectClip(1);
+
+                                targetForm.SelectImageCopyTarget(ImageCopyTarget.Base64);
+                                targetForm.TestApplySearch("Readable");
+                                AssertEqual(1, targetForm.ClipsListBox.Items.Count, "OCR search must isolate the selected image");
+                                AssertTarget(targetForm, ImageCopyTarget.Base64, "Copy Base64", "Filtering preserves the same selected image");
+                                targetForm.SearchTextBox.Focus();
+                                targetForm.SearchTextBox.SelectionStart = 3;
+                                targetForm.SearchTextBox.SelectionLength = 0;
+                                AssertTrue(!PressKey(targetForm, Keys.Left), "Left inside a search query must remain a caret action");
+                                AssertTarget(targetForm, ImageCopyTarget.Base64, "Copy Base64", "Search caret movement");
+                                targetForm.TestApplySearch("");
+                                AssertClipOrder(targetForm, expectedOrder, "Clearing an image OCR search");
+                                targetForm.TestSelectClip(0);
+                                targetForm.Size = new Size(420, 460);
+                                ProcessEvents();
+                                VerifyImageTargetLayout(targetForm, 0, false);
+                                VerifyImageTargetLayout(targetForm, 1, true);
+                                VerifyMainFormLayout(targetForm);
+                                VerifyFullWidthClipRows(targetForm);
+                            }
+                        }
+                    }, ref failureCount);
+
+                    RunTest("OCR Completion Preserves Target and Unavailable OCR Is Skipped", delegate
+                    {
+                        string refreshDirectory = Path.Combine(tempDir, "ImageTargetRefresh_" + Guid.NewGuid().ToString("N"));
+                        using (HistoryStore refreshHistory = new HistoryStore(settings, refreshDirectory))
+                        {
+                            ClipEntry entry = refreshHistory.CaptureImage(CreateSyntheticImageBase64(), 8401);
+                            using (MainForm refreshForm = new MainForm(refreshHistory, null, refreshDirectory, true, false, null))
+                            {
+                                ShowTestForm(refreshForm);
+                                AssertTrue(refreshForm.SelectImageCopyTarget(ImageCopyTarget.Base64), "Base64 must be selectable before OCR finishes");
+                                refreshHistory.SetOcrResult(entry.Id, "Asynchronously recognized text", OcrStates.Complete);
+                                ProcessEvents();
+                                AssertTarget(refreshForm, ImageCopyTarget.Base64, "Copy Base64", "OCR completion must not steal the chosen target");
+                                refreshForm.SelectImageCopyTarget(ImageCopyTarget.OcrText);
+                                refreshHistory.TogglePin(entry.Id);
+                                ProcessEvents();
+                                AssertTarget(refreshForm, ImageCopyTarget.OcrText, "Copy text", "Pin refresh preserves the current OCR target");
+                                refreshForm.TestRefresh();
+                                AssertTarget(refreshForm, ImageCopyTarget.OcrText, "Copy text", "Explicit refresh preserves the same image target");
+
+                                string[] missingStates = new string[]
+                                {
+                                    OcrStates.NoText, OcrStates.Unavailable, OcrStates.Failed, OcrStates.Pending
+                                };
+                                foreach (string missingState in missingStates)
+                                {
+                                    refreshHistory.SetOcrResult(entry.Id, null, missingState);
+                                    ProcessEvents();
+                                    AssertTarget(refreshForm, ImageCopyTarget.Image, "Copy image", "Invalidated OCR target must fall back to image");
+                                    AssertTrue(!refreshForm.SelectImageCopyTarget(ImageCopyTarget.OcrText),
+                                        "An OCR target without recognized text cannot be selected");
+                                    AssertTrue(refreshForm.GetImageTargetBounds(0, ImageCopyTarget.OcrText).IsEmpty,
+                                        "An OCR target without text must have no clickable region");
+                                    FocusPicker(refreshForm);
+                                    PressKey(refreshForm, Keys.Right);
+                                    AssertTarget(refreshForm, ImageCopyTarget.Base64, "Copy Base64", "Right skips unavailable OCR");
+                                    PressKey(refreshForm, Keys.Left);
+                                    AssertTarget(refreshForm, ImageCopyTarget.Image, "Copy image", "Left skips unavailable OCR");
+                                    refreshHistory.SetOcrResult(entry.Id, "Restored OCR text", OcrStates.Complete);
+                                    ProcessEvents();
+                                    AssertTarget(refreshForm, ImageCopyTarget.Image, "Copy image", "OCR arrival preserves the image target");
+                                    refreshForm.SelectImageCopyTarget(ImageCopyTarget.OcrText);
+                                }
+                            }
+                        }
+                    }, ref failureCount);
+
+                    RunTest("Selected Image Targets Route Copy and Preserve Privacy Guards", delegate
+                    {
+                        string copyDirectory = Path.Combine(tempDir, "ImageTargetCopy_" + Guid.NewGuid().ToString("N"));
+                        DateTime copyUtc = new DateTime(2026, 10, 10, 10, 0, 0, DateTimeKind.Utc);
+                        Settings copySettings = new Settings { MaxAgeMinutes = 1 };
+                        copySettings.Normalize();
+                        using (HistoryStore copyHistory = new HistoryStore(copySettings, copyDirectory, delegate { return copyUtc; }))
+                        {
+                            string imageBase64 = CreateSyntheticImageBase64();
+                            ClipEntry entry = copyHistory.CaptureImage(imageBase64, 8501);
+                            copyHistory.SetOcrResult(entry.Id, "Private synthetic image text", OcrStates.Complete);
+                            using (MainForm copyForm = new MainForm(copyHistory, null, copyDirectory, true, false, null))
+                            {
+                                ShowTestForm(copyForm);
+                                AssertTrue(!copyForm.DetailPanel.Visible, "Row copy targets must work while preview is collapsed");
+                                AssertSelectedCopyRoutes(copyForm, ImageCopyTarget.Image, "Copy image", "image copy simulated");
+                                AssertSelectedCopyRoutes(copyForm, ImageCopyTarget.OcrText, "Copy text", "text copy simulated");
+                                AssertSelectedCopyRoutes(copyForm, ImageCopyTarget.Base64, "Copy Base64", "Base64 copy simulated");
+                                AssertTrue(copyHistory.GetText(entry.Id) == imageBase64, "All copy targets must retain the full original image");
+                                AssertTrue(copyHistory.GetOcrText(entry.Id) == "Private synthetic image text", "All copy targets must retain recognized text");
+                                AssertEqual(1, copyHistory.Snapshot().Count, "Simulated copies must not alter clipboard history");
+
+                                copyForm.PreviewToggleButton.PerformClick();
+                                copyForm.CopyImageTextButton.PerformClick();
+                                AssertTarget(copyForm, ImageCopyTarget.OcrText, "Copy text", "Explicit preview text action");
+                                AssertTrue(GetToast(copyForm).Text.Contains("text copy simulated"), "Preview text button must copy OCR");
+                                copyForm.CopyImageBase64Button.PerformClick();
+                                AssertTarget(copyForm, ImageCopyTarget.Base64, "Copy Base64", "Explicit preview base64 action");
+                                AssertTrue(GetToast(copyForm).Text.Contains("Base64 copy simulated"), "Preview base64 button must copy base64");
+                                AssertSelectedCopyRoutes(copyForm, ImageCopyTarget.Image, "Copy image", "image copy simulated");
+
+                                copyForm.SelectImageCopyTarget(ImageCopyTarget.OcrText);
+                                copyHistory.Protect(8501);
+                                ProcessEvents();
+                                AssertTrue(!copyForm.CopyButton.Enabled, "Protected image copy must be disabled");
+                                AssertTrue(!copyForm.SelectImageCopyTarget(ImageCopyTarget.OcrText), "Protected OCR cannot be selected");
+                                AssertTrue(copyForm.GetImageTargetBounds(0, ImageCopyTarget.Image).IsEmpty,
+                                    "Protected images must not expose an image copy region");
+                                GetToast(copyForm).Text = "";
+                                FocusPicker(copyForm);
+                                PressKey(copyForm, Keys.Enter);
+                                PressTextBoxKey(copyForm.OcrPreviewTextBox, Keys.Control | Keys.C);
+                                AssertTrue(GetToast(copyForm).Text == "", "Protected image keyboard actions must not copy any payload");
+                                AssertTrue(copyForm.OcrPreviewTextBox.Text.IndexOf("Private synthetic", StringComparison.Ordinal) < 0,
+                                    "Protected OCR must be removed from preview controls");
+
+                                copyHistory.Remove(entry.Id);
+                                entry = copyHistory.CaptureImage(CreateSyntheticImageBase64(2028), 8502);
+                                copyHistory.SetOcrResult(entry.Id, "Expiring OCR text", OcrStates.Complete);
+                                ProcessEvents();
+                                AssertTrue(copyForm.SelectImageCopyTarget(ImageCopyTarget.Base64), "A fresh image must offer base64 before expiring");
+                                AssertTrue(copyForm.CopyButton.Enabled, "The expiry fixture must begin with a copyable image");
+                                copyUtc = copyUtc.AddMinutes(2);
+                                GetToast(copyForm).Text = "";
+                                copyForm.CopyButton.PerformClick();
+                                AssertTrue(GetToast(copyForm).Text == "", "An expired image must not copy its old selected target");
+                                AssertEqual(0, copyForm.ClipsListBox.Items.Count, "Copying an expired image must refresh the empty list");
                             }
                         }
                     }, ref failureCount);
@@ -1140,20 +1542,23 @@ namespace DollyPaste.Tests
 
             Control[] mainRegions = new Control[]
             {
-                form.HeaderPanel, form.SearchFilterPanel, form.ContentPanel, form.DetailToolbarPanel
+                form.HeaderPanel, form.SearchFilterPanel, form.TypeFilterPanel, form.ContentPanel, form.DetailToolbarPanel
             };
             AssertNonOverlappingChildren(mainRegions, form.MainPanel, "Main region");
 
             Control[] searchControls = new Control[]
             {
-                form.SearchTextBox, form.NavAllButton, form.NavPinnedButton,
-                form.FilterAllButton, form.FilterTextButton, form.FilterLinkButton, form.FilterCodeButton, form.FilterImageButton
+                form.SearchTextBox, form.NavAllButton, form.NavPinnedButton
             };
             AssertNonOverlappingChildren(searchControls, form.SearchFilterPanel, "Search/filter control");
+            AssertNonOverlappingChildren(new Control[]
+            {
+                form.FilterAllButton, form.FilterTextButton, form.FilterLinkButton, form.FilterCodeButton, form.FilterImageButton
+            }, form.TypeFilterPanel, "Content type filter");
 
             Control[] headerControls = new Control[]
             {
-                form.HeaderTitleLabel, form.PauseResumeButton, form.SettingsButton
+                form.HeaderTitleLabel, form.CloseButton
             };
             AssertNonOverlappingChildren(headerControls, form.HeaderPanel, "Header control");
 
@@ -1171,22 +1576,111 @@ namespace DollyPaste.Tests
                 AssertTrue(form.DetailContentPanel.Visible, "Expanded preview must expose details for the selected clip");
                 AssertFits(form.DetailPanel, form.ContentPanel, "DetailPanel");
                 AssertNoIntersection(form.ListContainerPanel.Bounds, form.DetailPanel.Bounds, "ListContainerPanel", "DetailPanel");
-                AssertFits(form.DetailMetaPanel, form.DetailContentPanel, "DetailMetaPanel");
                 AssertFits(form.DetailTextContainerPanel, form.DetailContentPanel, "DetailTextContainerPanel");
-                AssertNoIntersection(form.DetailMetaPanel.Bounds, form.DetailTextContainerPanel.Bounds,
-                    "DetailMetaPanel", "DetailTextContainerPanel");
-                Control[] detailLabels = new Control[]
+                if (form.ImageActionsPanel.Visible)
                 {
-                    form.DetailKindLabel, form.DetailTimeLabel, form.CharCountLabel
-                };
-                AssertNonOverlappingChildren(detailLabels, form.DetailMetaPanel, "Preview metadata");
+                    AssertTrue(!form.DetailMetaPanel.Visible, "Image actions must replace metadata to preserve preview space");
+                    AssertFits(form.ImageActionsPanel, form.DetailContentPanel, "ImageActionsPanel");
+                    AssertNoIntersection(form.ImageActionsPanel.Bounds, form.DetailTextContainerPanel.Bounds,
+                        "ImageActionsPanel", "DetailTextContainerPanel");
+                    AssertNonOverlappingChildren(new Control[]
+                    {
+                        form.CopyImageBase64Button, form.CopyImageTextButton
+                    }, form.ImageActionsPanel, "Image preview action");
+                    AssertTrue(form.OcrPreviewPanel.Visible, "OCR and base64 must be visible simultaneously for images");
+                    AssertFits(form.PreviewTextBox, form.DetailTextContainerPanel, "Base64 preview");
+                    AssertFits(form.OcrPreviewPanel, form.DetailTextContainerPanel, "OCR preview column");
+                    AssertFits(form.OcrPreviewTextBox, form.OcrPreviewPanel, "OCR text preview");
+                    AssertNoIntersection(form.PreviewTextBox.Bounds, form.OcrPreviewPanel.Bounds,
+                        "Base64 preview", "OCR preview column");
+                    AssertTrue(form.PreviewTextBox.Right <= form.OcrPreviewPanel.Left,
+                        "The base64 value must be on the left and OCR on the right");
+                }
+                else
+                {
+                    AssertFits(form.DetailMetaPanel, form.DetailContentPanel, "DetailMetaPanel");
+                    AssertNoIntersection(form.DetailMetaPanel.Bounds, form.DetailTextContainerPanel.Bounds,
+                        "DetailMetaPanel", "DetailTextContainerPanel");
+                    Control[] detailLabels = new Control[]
+                    {
+                        form.DetailKindLabel, form.DetailTimeLabel, form.CharCountLabel
+                    };
+                    AssertNonOverlappingChildren(detailLabels, form.DetailMetaPanel, "Preview metadata");
+                }
             }
 
-            // Hidden toast overlays must not steal room from status or clip actions.
-            AssertTrue(form.StatusLeftLabel.Right <= form.StatusRightLabel.Left,
-                string.Format("StatusLeftLabel (Right={0}) must precede StatusRightLabel (Left={1})",
-                    form.StatusLeftLabel.Right, form.StatusRightLabel.Left));
-            AssertNoIntersection(form.StatusLeftLabel.Bounds, form.StatusRightLabel.Bounds, "StatusLeftLabel", "StatusRightLabel");
+            // Footer feedback and clipboard controls must remain separate, including during copy.
+            AssertNonOverlappingChildren(new Control[]
+            {
+                form.PauseResumeButton, form.SettingsButton
+            }, form.StatusBarPanel, "Bottom-right control");
+            Control[] feedback = new Control[] { form.StatusLeftLabel, form.StatusRightLabel, GetToast(form) };
+            for (int i = 0; i < feedback.Length; i++)
+            {
+                if (!feedback[i].Visible) continue;
+                AssertFits(feedback[i], form.StatusBarPanel, "Footer feedback");
+                AssertNoIntersection(feedback[i].Bounds, form.PauseResumeButton.Bounds, "Footer feedback", "Pause");
+                AssertNoIntersection(feedback[i].Bounds, form.SettingsButton.Bounds, "Footer feedback", "Settings");
+                for (int j = i + 1; j < feedback.Length; j++)
+                {
+                    if (feedback[j].Visible)
+                        AssertNoIntersection(feedback[i].Bounds, feedback[j].Bounds, "Footer feedback " + i, "Footer feedback " + j);
+                }
+            }
+        }
+
+        private static int CountVisibleTitleLabels(Control parent)
+        {
+            int count = 0;
+            foreach (Control control in parent.Controls)
+            {
+                if (!control.Visible) continue;
+                if (control is Label && control.Text == "Dolly Paste") count++;
+                count += CountVisibleTitleLabels(control);
+            }
+            return count;
+        }
+
+        private static void AssertNoBrandTagline(Control parent)
+        {
+            foreach (Control control in parent.Controls)
+            {
+                if (!control.Visible) continue;
+                AssertTrue(control.Text.IndexOf("by SSS", StringComparison.OrdinalIgnoreCase) < 0 &&
+                           control.Text.IndexOf("Local clipboard", StringComparison.OrdinalIgnoreCase) < 0,
+                    "The compact popup must not repeat the removed brand/local clipboard tagline");
+                AssertNoBrandTagline(control);
+            }
+        }
+
+        private static void AssertClipOrder(MainForm form, ClipEntry[] expected, string reason)
+        {
+            AssertEqual(expected.Length, form.ClipsListBox.Items.Count, reason + ": item count");
+            for (int i = 0; i < expected.Length; i++)
+                AssertTrue(((ClipEntry)form.ClipsListBox.Items[i]).Id == expected[i].Id,
+                    reason + ": selecting a clip or format must not reorder history at index " + i);
+        }
+
+        private static void VerifyFullWidthClipRows(MainForm form)
+        {
+            Rectangle first = Rectangle.Empty;
+            Rectangle previous = Rectangle.Empty;
+            for (int i = 0; i < form.ClipsListBox.Items.Count; i++)
+            {
+                Rectangle row = form.ClipsListBox.GetItemRectangle(i);
+                Rectangle card = form.GetClipCardBounds(i);
+                AssertTrue(card.Width >= form.ClipsListBox.ClientSize.Width - 24,
+                    "Every history card must use the full available row width with compact side gutters");
+                AssertTrue(row.Contains(card), "Each clipboard card must fit within its own vertical history row");
+                if (i == 0) first = card;
+                else
+                {
+                    AssertEqual(first.Left, card.Left, "All content types must share the same left edge");
+                    AssertEqual(first.Right, card.Right, "All content types must share the same right edge");
+                    AssertTrue(card.Top >= previous.Bottom, "Clipboard items must stack vertically without overlapping");
+                }
+                previous = card;
+            }
         }
 
         private static void AssertFits(Control child, Control parent, string name)
@@ -1206,6 +1700,113 @@ namespace DollyPaste.Tests
                     AssertNoIntersection(children[i].Bounds, children[j].Bounds,
                         description + " " + i, description + " " + j);
                 }
+            }
+        }
+
+        private static void ShowTestForm(MainForm form)
+        {
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = new Point(-20000, -20000);
+            form.Show();
+            ProcessEvents();
+        }
+
+        private static void FocusPicker(MainForm form)
+        {
+            form.Activate();
+            form.ClipsListBox.Focus();
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+
+        private static void PressListArrow(MainForm form, Keys key)
+        {
+            FocusPicker(form);
+            // Native ListBox navigation follows ProcessCmdKey, so exercise the
+            // actual control rather than invoking only the form's shortcut hook.
+            SendMessage(form.ClipsListBox.Handle, 0x0100, new IntPtr((int)key), IntPtr.Zero);
+            SendMessage(form.ClipsListBox.Handle, 0x0101, new IntPtr((int)key), IntPtr.Zero);
+            ProcessEvents();
+        }
+
+        private static void AssertTarget(MainForm form, ImageCopyTarget expected, string expectedLabel, string reason)
+        {
+            AssertTrue(form.SelectedImageCopyTarget == expected,
+                reason + ": expected " + expected + ", got " + form.SelectedImageCopyTarget);
+            AssertTrue(form.CopyButton.Text == expectedLabel,
+                reason + ": primary copy label must identify the selected target");
+            AssertTrue((form.CopyButton.AccessibleName ?? "").Contains(expectedLabel),
+                reason + ": accessible copy label must identify the selected target");
+            AssertTrue((form.ClipsListBox.AccessibleDescription ?? "").Contains(expectedLabel),
+                reason + ": keyboard target selection must have an accessible description");
+        }
+
+        private static void ClickImageTarget(MainForm form, int index, ImageCopyTarget target)
+        {
+            Rectangle bounds = form.GetImageTargetBounds(index, target);
+            AssertTrue(!bounds.IsEmpty, "The requested image target must have a hit region");
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var mouseDown = typeof(MainForm).GetMethod("OnClipsMouseDown", flags);
+            AssertTrue(mouseDown != null, "Image row mouse handler must be present");
+            mouseDown.Invoke(form, new object[] { form.ClipsListBox,
+                new MouseEventArgs(MouseButtons.Left, 1, bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2, 0) });
+        }
+
+        private static void VerifyImageTargetLayout(MainForm form, int index, bool hasOcr)
+        {
+            Rectangle row = form.ClipsListBox.GetItemRectangle(index);
+            Rectangle image = form.GetImageTargetBounds(index, ImageCopyTarget.Image);
+            Rectangle ocr = form.GetImageTargetBounds(index, ImageCopyTarget.OcrText);
+            Rectangle base64 = form.GetImageTargetBounds(index, ImageCopyTarget.Base64);
+            AssertTrue(image.Width >= 24 && image.Height >= 24, "Image target must have a usable click area");
+            AssertTrue(base64.Width >= 24 && base64.Height >= 24, "Base64 target must have a usable click area");
+            AssertTrue(row.Contains(image) && row.Contains(base64), "Image and base64 targets must fit their history row");
+            AssertTrue(form.ClipsListBox.ClientRectangle.Contains(image) && form.ClipsListBox.ClientRectangle.Contains(base64),
+                "Visible-row image targets must fit the list viewport");
+            AssertNoIntersection(image, base64, "Image target", "Base64 target");
+            AssertTrue(image.Right <= base64.Left, "Image must precede base64 in the target order");
+            if (hasOcr)
+            {
+                AssertTrue(ocr.Width >= 24 && ocr.Height >= 24, "OCR target must have a usable click area");
+                AssertTrue(row.Contains(ocr), "OCR target must fit its history row");
+                AssertNoIntersection(image, ocr, "Image target", "OCR target");
+                AssertNoIntersection(ocr, base64, "OCR target", "Base64 target");
+                AssertTrue(image.Right <= ocr.Left && ocr.Right <= base64.Left,
+                    "OCR target must sit between the image and base64 targets");
+            }
+            else
+            {
+                AssertTrue(ocr.IsEmpty, "An image without OCR text must not offer an OCR click target");
+            }
+        }
+
+        private static void AssertSelectedCopyRoutes(MainForm form, ImageCopyTarget target, string label, string expectedToast)
+        {
+            AssertTrue(form.SelectImageCopyTarget(target), "Available image target must be selectable");
+            AssertTarget(form, target, label, "Copy routing target");
+            GetToast(form).Text = "";
+            form.CopyButton.PerformClick();
+            AssertTrue(GetToast(form).Text.Contains(expectedToast), "Primary copy must route the selected " + target + " target");
+
+            GetToast(form).Text = "";
+            FocusPicker(form);
+            AssertTrue(PressKey(form, Keys.Enter), "Enter must be handled by the focused picker");
+            AssertTrue(GetToast(form).Text.Contains(expectedToast), "Enter must route the selected " + target + " target");
+            GetToast(form).Text = "";
+            AssertTrue(PressKey(form, Keys.Control | Keys.C), "Ctrl+C must be handled by the focused picker");
+            AssertTrue(GetToast(form).Text.Contains(expectedToast), "Picker Ctrl+C must route the selected " + target + " target");
+
+            TextBox[] previews = new TextBox[] { form.PreviewTextBox, form.OcrPreviewTextBox };
+            foreach (TextBox preview in previews)
+            {
+                GetToast(form).Text = "";
+                AssertTrue(PressTextBoxKey(preview, Keys.Control | Keys.C), "Preview Ctrl+C must use the guarded copy route");
+                AssertTrue(GetToast(form).Text.Contains(expectedToast), "Preview Ctrl+C must route the selected " + target + " target");
+                GetToast(form).Text = "";
+                SendTextBoxCopyMessage(preview);
+                AssertTrue(GetToast(form).Text.Contains(expectedToast), "Native preview copy must route the selected " + target + " target");
             }
         }
 
@@ -1312,11 +1913,11 @@ namespace DollyPaste.Tests
             }
         }
 
-        private static string CreateSyntheticImageBase64()
+        private static string CreateSyntheticImageBase64(int seed = 2026)
         {
             using (Bitmap bitmap = new Bitmap(160, 120))
             {
-                Random random = new Random(2026);
+                Random random = new Random(seed);
                 for (int y = 0; y < bitmap.Height; y++)
                 {
                     for (int x = 0; x < bitmap.Width; x++)

@@ -34,6 +34,11 @@ namespace DollyPaste.Tests
             RunTest("Test_ImageCapture_PayloadRetentionCap", Test_ImageCapture_PayloadRetentionCap);
             RunTest("Test_ImagePersistence_EncryptedMixedHistoryRoundtrip", Test_ImagePersistence_EncryptedMixedHistoryRoundtrip);
             RunTest("Test_ImagePersistence_RejectsInvalidImagesAndKeepsLegacyText", Test_ImagePersistence_RejectsInvalidImagesAndKeepsLegacyText);
+            RunTest("Test_Ocr_ResultStateAndDeduplication", Test_Ocr_ResultStateAndDeduplication);
+            RunTest("Test_Ocr_LateResultsNeverRestoreRemovedImages", Test_Ocr_LateResultsNeverRestoreRemovedImages);
+            RunTest("Test_Ocr_ProtectionScrubsBothRepresentations", Test_Ocr_ProtectionScrubsBothRepresentations);
+            RunTest("Test_Ocr_TextAndAggregatePayloadCaps", Test_Ocr_TextAndAggregatePayloadCaps);
+            RunTest("Test_Ocr_EncryptedPersistenceAndLegacyLoading", Test_Ocr_EncryptedPersistenceAndLegacyLoading);
             RunTest("Test_Deduplication_PreservesOriginalCaptureAge", Test_Deduplication_PreservesOriginalCaptureAge);
             RunTest("Test_ExpiryBoundary_ExactBoundaryIncludingPins", Test_ExpiryBoundary_ExactBoundaryIncludingPins);
             RunTest("Test_ProtectExisting_CensorAndDiscardModes", Test_ProtectExisting_CensorAndDiscardModes);
@@ -556,6 +561,237 @@ namespace DollyPaste.Tests
                     AssertEqual(2, snapshot.Count, "Invalid image and oversized text fixture entries are rejected");
                     Assert(snapshot.Exists(delegate(ClipEntry item) { return item.Kind == "TEXT" && item.Text == "legacy text"; }), "Version 1 text remains compatible");
                     Assert(snapshot.Exists(delegate(ClipEntry item) { return item.Kind == "LINK" && item.Text == "https://example.com/legacy"; }), "Legacy missing kind still inferred from text");
+                }
+            }
+            finally
+            {
+                CleanupDir(tempDir);
+            }
+        }
+
+        private static void Test_Ocr_ResultStateAndDeduplication()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            string payload = CreateNoiseImageBase64(16, 16, 401);
+            using (HistoryStore store = new HistoryStore(new Settings(), null, delegate() { return now; }))
+            {
+                ClipEntry image = store.CaptureImage(payload, 1);
+                AssertEqual(OcrStates.Pending, image.OcrStatus, "New image is queued for OCR");
+                AssertEqual(string.Empty, image.OcrText, "Image starts without extracted text");
+                Assert(store.GetOcrText(image.Id) == null, "Pending image cannot copy OCR text");
+                int notifications = 0;
+                store.Changed += delegate { notifications++; };
+                Assert(store.SetOcrResult(image.Id, "  Invoice 123\r\nAmount: 42 EUR  ", OcrStates.Complete), "Active image accepts OCR result");
+                AssertEqual(1, notifications, "OCR completion publishes a history change");
+                AssertEqual("Invoice 123\r\nAmount: 42 EUR", store.GetOcrText(image.Id), "Recognized lines are available as text");
+                AssertEqual(payload, store.GetText(image.Id), "Normal copy continues to return exact image base64");
+                AssertEqual(OcrStates.Pending, image.OcrStatus, "Capture result is a detached snapshot");
+                ClipEntry duplicate = store.CaptureImage(payload, 2);
+                AssertEqual(image.Id, duplicate.Id, "Image deduplication preserves ID");
+                AssertEqual(now, duplicate.CapturedUtc, "OCR does not change expiry age");
+                AssertEqual(OcrStates.Complete, duplicate.OcrStatus, "Deduplication retains completed OCR");
+                AssertEqual(store.GetOcrText(image.Id), duplicate.OcrText, "Deduplication retains recognized text");
+                Assert(store.SetOcrResult(image.Id, " \r\n ", OcrStates.Complete), "Blank successful result is accepted");
+                AssertEqual(OcrStates.NoText, store.GetImageForOcr(image.Id).OcrStatus, "Blank OCR is normalized to no-text");
+                Assert(store.GetOcrText(image.Id) == null, "No-text image has nothing to copy");
+                store.SetOcrResult(image.Id, "text must not leak from a failure", OcrStates.Unavailable);
+                AssertEqual(string.Empty, store.GetImageForOcr(image.Id).OcrText, "Unavailable result stores no supplied text");
+                AssertEqual(OcrStates.Unavailable, store.CaptureImage(payload, 3).OcrStatus, "Deduplication also retains unavailable state");
+                ClipEntry textEntry = store.Capture("ordinary text", 4);
+                Assert(!store.SetOcrResult(textEntry.Id, "wrong kind", OcrStates.Complete), "OCR cannot attach to text entries");
+                Assert(store.GetImageForOcr(textEntry.Id) == null, "OCR reader only exposes image entries");
+            }
+        }
+
+        private static void Test_Ocr_LateResultsNeverRestoreRemovedImages()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime clock = now;
+            Settings settings = new Settings { MaxAgeMinutes = 1, MaxItems = 10 };
+            string payload = CreateNoiseImageBase64(16, 16, 402);
+            using (HistoryStore store = new HistoryStore(settings, null, delegate() { return clock; }))
+            {
+                ClipEntry removed = store.CaptureImage(payload, 1);
+                store.Remove(removed.Id);
+                Assert(!store.SetOcrResult(removed.Id, "late result", OcrStates.Complete), "Removed image rejects a late result");
+                AssertEqual(0, store.Snapshot().Count, "Late result does not recreate an image");
+                ClipEntry cleared = store.CaptureImage(payload, 2);
+                store.Clear();
+                Assert(!store.SetOcrResult(cleared.Id, "late result", OcrStates.Complete), "Cleared image rejects a late result");
+                ClipEntry expired = store.CaptureImage(payload, 3);
+                store.TogglePin(expired.Id);
+                clock = now.AddMinutes(1);
+                Assert(!store.SetOcrResult(expired.Id, "late result", OcrStates.Complete), "Pinned image rejects result at exact expiry boundary");
+                Assert(store.GetImageForOcr(expired.Id) == null, "Expired image cannot be read by OCR worker");
+                Assert(store.GetOcrText(expired.Id) == null, "Expired OCR cannot be copied");
+                ClipEntry evicted = store.CaptureImage(payload, 4);
+                for (uint i = 5; i < 16; i++) store.Capture("later item " + i, i);
+                Assert(!store.SetOcrResult(evicted.Id, "late result", OcrStates.Complete), "Count-evicted image rejects a late result");
+                ClipEntry sensitive = store.CaptureImage(payload, 16);
+                store.Protect(16);
+                Assert(!store.SetOcrResult(sensitive.Id, "secret", OcrStates.Complete), "Protected image rejects result while tombstone remains");
+                Assert(store.GetImageForOcr(sensitive.Id) == null, "Protected image cannot be read by worker");
+                store.Dispose();
+                Assert(!store.SetOcrResult(sensitive.Id, "late result", OcrStates.Complete), "Disposed store ignores late result");
+                Assert(store.GetImageForOcr(sensitive.Id) == null, "Disposed store cannot expose image data");
+            }
+        }
+
+        private static void Test_Ocr_ProtectionScrubsBothRepresentations()
+        {
+            string payload = CreateNoiseImageBase64(16, 16, 403);
+            foreach (SensitiveBehavior behavior in new SensitiveBehavior[] { SensitiveBehavior.Censor, SensitiveBehavior.Discard })
+            {
+                using (HistoryStore store = new HistoryStore(new Settings { SensitiveBehavior = behavior }, null))
+                {
+                    ClipEntry image = store.CaptureImage(payload, 1);
+                    store.SetOcrResult(image.Id, "recognized secret", OcrStates.Complete);
+                    ClipEntry text = store.Capture("recognized secret", 2);
+                    store.TrackRestoredOcr(image.Id, 3);
+                    store.Protect(3);
+                    Assert(store.GetText(image.Id) == null, "Protecting copied OCR also scrubs image bytes");
+                    Assert(store.GetOcrText(image.Id) == null, "Protected OCR is unavailable");
+                    Assert(store.GetText(text.Id) == null, "OCR copy tracks its own text fingerprint");
+                    foreach (ClipEntry retained in store.Snapshot())
+                    {
+                        AssertEqual(string.Empty, retained.OcrText, "Tombstone removes extracted text");
+                        AssertEqual(string.Empty, retained.OcrStatus, "Tombstone removes OCR state");
+                    }
+                    ClipEntry recaptured = store.CaptureImage(payload, 4);
+                    Assert(recaptured == null || recaptured.IsSensitive, "Derived text protection suppresses original image recapture");
+                    Assert(!store.SetOcrResult(image.Id, "late secret", OcrStates.Complete), "OCR cannot restore scrubbed content");
+                }
+                using (HistoryStore store = new HistoryStore(new Settings { SensitiveBehavior = behavior }, null))
+                {
+                    ClipEntry image = store.CaptureImage(payload, 10);
+                    store.SetOcrResult(image.Id, "protected through original image", OcrStates.Complete);
+                    store.TrackRestoredOcr(image.Id, 11);
+                    store.Protect(10);
+                    ClipEntry text = store.Capture("protected through original image", 12);
+                    Assert(text == null || text.IsSensitive, "Original image fingerprint still protects associated text after Copy text");
+                }
+                using (HistoryStore store = new HistoryStore(new Settings { SensitiveBehavior = behavior }, null))
+                {
+                    ClipEntry image = store.CaptureImage(payload, 20);
+                    store.SetOcrResult(image.Id, "pending race", OcrStates.Complete);
+                    store.Protect(21);
+                    store.TrackRestoredOcr(image.Id, 21);
+                    Assert(store.GetText(image.Id) == null, "Protection arriving before Copy text tracking scrubs image");
+                }
+                using (HistoryStore store = new HistoryStore(new Settings { SensitiveBehavior = behavior }, null))
+                {
+                    store.Capture("known secret", 30);
+                    store.Protect(30);
+                    ClipEntry image = store.CaptureImage(payload, 31);
+                    Assert(!store.SetOcrResult(image.Id, "known secret", OcrStates.Complete), "OCR cannot expose an already suppressed text value");
+                    Assert(store.GetText(image.Id) == null, "Image of known protected text is scrubbed");
+                }
+            }
+        }
+
+        private static void Test_Ocr_TextAndAggregatePayloadCaps()
+        {
+            using (HistoryStore store = new HistoryStore(new Settings(), null))
+            {
+                ClipEntry image = store.CaptureImage(CreateNoiseImageBase64(8, 8, 404), 1);
+                store.SetOcrResult(image.Id, new string('x', 32767) + "\ud83d\ude00suffix", OcrStates.Complete);
+                string bounded = store.GetOcrText(image.Id);
+                AssertEqual(32767, bounded.Length, "OCR truncation keeps a surrogate pair intact");
+                Assert(!char.IsHighSurrogate(bounded[bounded.Length - 1]), "Truncated OCR contains no dangling high surrogate");
+                store.Clear();
+                string recognized = new string('\u754c', 32769);
+                for (int i = 0; i < 50; i++)
+                {
+                    ClipEntry item = store.CaptureImage(CreateNoiseImageBase64(8, 8, 500 + i), (uint)(10 + i));
+                    store.TogglePin(item.Id);
+                    Assert(store.SetOcrResult(item.Id, recognized, OcrStates.Complete), "Newest pinned image fits total payload budget");
+                    AssertEqual(32768, store.GetOcrText(item.Id).Length, "OCR text is bounded independently of image bytes");
+                }
+                List<ClipEntry> snapshot = store.Snapshot();
+                int bytes = 0;
+                foreach (ClipEntry entry in snapshot) bytes += Encoding.UTF8.GetByteCount(entry.Text) + Encoding.UTF8.GetByteCount(entry.OcrText);
+                Assert(snapshot.Count > 0 && snapshot.Count < 50, "OCR text causes older pinned records to be evicted");
+                Assert(bytes <= 4 * 1024 * 1024, "UTF-8 OCR bytes share the existing 4 MiB retention budget");
+
+                store.Clear();
+                // Padding after IEND exercises the accepted encoded-byte boundary
+                // without a huge decoded bitmap or dependence on compression ratios.
+                byte[] png = Convert.FromBase64String(CreateNoiseImageBase64(8, 8, 601));
+                byte[] nearLimitPng = new byte[ImagePayload.MaxPngBytes - 3];
+                Buffer.BlockCopy(png, 0, nearLimitPng, 0, png.Length);
+                string nearLimitPayload = Convert.ToBase64String(nearLimitPng);
+                ClipEntry nearLimitImage = store.CaptureImage(nearLimitPayload, 100);
+                Assert(nearLimitImage != null, "Near-limit image fixture remains a valid PNG");
+                Assert(store.SetOcrResult(nearLimitImage.Id, "\ud83d\ude00more text", OcrStates.Complete), "OCR retains the original near-limit image");
+                AssertEqual("\ud83d\ude00", store.GetOcrText(nearLimitImage.Id), "Four remaining bytes retain exactly one supplementary Unicode character");
+                AssertEqual(nearLimitPayload, store.GetText(nearLimitImage.Id), "Byte-budget clipping never changes original base64");
+                AssertEqual(1, store.Snapshot().Count, "Near-limit image is not evicted by its OCR result");
+
+                store.Clear();
+                byte[] limitPng = new byte[ImagePayload.MaxPngBytes];
+                Buffer.BlockCopy(png, 0, limitPng, 0, png.Length);
+                string limitPayload = Convert.ToBase64String(limitPng);
+                ClipEntry limitImage = store.CaptureImage(limitPayload, 101);
+                Assert(limitImage != null, "Exact-limit image fixture is valid");
+                Assert(store.SetOcrResult(limitImage.Id, "recognized text", OcrStates.Complete), "No space for OCR still preserves the original image");
+                AssertEqual(limitPayload, store.GetText(limitImage.Id), "Exact-limit image bytes remain available");
+                Assert(store.GetOcrText(limitImage.Id) == null, "No extracted text is retained beyond the budget");
+                AssertEqual(OcrStates.Failed, store.GetImageForOcr(limitImage.Id).OcrStatus, "Storage limit is not misreported as no recognized text");
+            }
+        }
+
+        private static void Test_Ocr_EncryptedPersistenceAndLegacyLoading()
+        {
+            string tempDir = CreateTempDir();
+            try
+            {
+                DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+                Settings settings = new Settings { PersistHistory = true };
+                string payload = CreateNoiseImageBase64(16, 16, 405);
+                Guid imageId;
+                string historyFile = Path.Combine(tempDir, "history.dat");
+                using (HistoryStore store = new HistoryStore(settings, tempDir, delegate() { return now; }))
+                {
+                    imageId = store.CaptureImage(payload, 1).Id;
+                    store.SetOcrResult(imageId, "private recognized invoice", OcrStates.Complete);
+                    Assert(string.IsNullOrEmpty(store.StorageWarning), "OCR persistence succeeds: " + store.StorageWarning);
+                }
+                string raw = Encoding.UTF8.GetString(File.ReadAllBytes(historyFile));
+                Assert(raw.IndexOf("private recognized invoice", StringComparison.Ordinal) < 0, "OCR text is encrypted with image history");
+                using (HistoryStore store = new HistoryStore(settings, tempDir, delegate() { return now; }))
+                {
+                    AssertEqual("private recognized invoice", store.GetOcrText(imageId), "Extracted text survives encrypted reload");
+                    AssertEqual(OcrStates.Complete, store.GetImageForOcr(imageId).OcrStatus, "Completion state survives reload");
+                    AssertEqual(payload, store.GetText(imageId), "OCR persistence preserves exact original base64");
+                    store.TrackRestoredOcr(imageId, 2);
+                    store.Protect(2);
+                }
+                using (HistoryStore store = new HistoryStore(settings, tempDir, delegate() { return now; }))
+                {
+                    Assert(store.GetOcrText(imageId) == null, "Protected extracted text stays scrubbed after restart");
+                    AssertEqual(string.Empty, store.Snapshot()[0].OcrText, "Persisted tombstone contains no OCR text");
+                }
+
+                Guid legacyId = Guid.NewGuid();
+                Guid oversizedId = Guid.NewGuid();
+                Guid textId = Guid.NewGuid();
+                HistoryFileDto dto = new HistoryFileDto { Version = 1, Records = new List<HistoryRecordDto>() };
+                dto.Records.Add(new HistoryRecordDto { Id = legacyId, Text = payload, CapturedUtc = now, Kind = "IMAGE" });
+                dto.Records.Add(new HistoryRecordDto { Id = oversizedId, Text = payload, CapturedUtc = now, Kind = "IMAGE", OcrStatus = OcrStates.Complete, OcrText = new string('z', 40000) });
+                dto.Records.Add(new HistoryRecordDto { Id = textId, Text = "legacy text", CapturedUtc = now, Kind = "TEXT", OcrStatus = OcrStates.Complete, OcrText = "invalid attachment" });
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    new DataContractJsonSerializer(typeof(HistoryFileDto)).WriteObject(stream, dto);
+                    File.WriteAllBytes(historyFile, ProtectedData.Protect(stream.ToArray(), null, DataProtectionScope.CurrentUser));
+                }
+                using (HistoryStore store = new HistoryStore(settings, tempDir, delegate() { return now; }))
+                {
+                    AssertEqual(OcrStates.Pending, store.GetImageForOcr(legacyId).OcrStatus, "Legacy image without OCR fields becomes pending");
+                    AssertEqual(string.Empty, store.GetImageForOcr(legacyId).OcrText, "Legacy image has no invented text");
+                    AssertEqual(32768, store.GetOcrText(oversizedId).Length, "Loaded OCR text obeys the same character cap");
+                    ClipEntry text = store.Snapshot().Find(delegate(ClipEntry entry) { return entry.Id == textId; });
+                    AssertEqual("legacy text", text.Text, "Legacy text still loads unchanged");
+                    AssertEqual(string.Empty, text.OcrText, "Loader rejects OCR attached to non-image records");
                 }
             }
             finally

@@ -25,8 +25,10 @@ namespace DollyPaste
             RunPureBoundedFormatPayloadTests();
             RunUnmanagedBufferParsingTests();
             RunImageCaptureTests();
+            RunDelayedImageRenderingTests();
             RunInjectedPublicationStateMachineTests();
             RunImageBase64PublicationTests();
+            RunImagePublicationTests();
             RunPureSchedulingTests();
             RunDestinationClassificationTests();
             RunPasteProtectionDecisionTests();
@@ -393,6 +395,8 @@ namespace DollyPaste
             internal IntPtr FailedLock;
             internal Bitmap SourceBitmap;
             internal Bitmap LastClone;
+            internal readonly List<Bitmap> BitmapClones = new List<Bitmap>();
+            internal Action<uint> OnDataRead;
 
             internal IntPtr AddBytes(uint format, byte[] bytes)
             {
@@ -413,7 +417,12 @@ namespace DollyPaste
             internal void SetReportedSize(IntPtr handle, ulong size) { _sizes[handle] = size; }
             public uint GetSequenceNumber() { return SequenceReads++ == 0 ? InitialSequence : FinalSequence; }
             public bool IsFormatAvailable(uint format) { return _formats.ContainsKey(format); }
-            public IntPtr GetData(uint format) { DataReads.Add(format); return _formats[format]; }
+            public IntPtr GetData(uint format)
+            {
+                DataReads.Add(format);
+                if (OnDataRead != null) OnDataRead(format);
+                return _formats[format];
+            }
             public ulong GetSize(IntPtr handle) { return _sizes[handle]; }
             public IntPtr Lock(IntPtr handle) { LockCount++; return handle == FailedLock ? IntPtr.Zero : handle; }
             public void Unlock(IntPtr handle) { UnlockCount++; }
@@ -421,6 +430,7 @@ namespace DollyPaste
             {
                 BitmapCloneCount++;
                 LastClone = (Bitmap)SourceBitmap.Clone();
+                BitmapClones.Add(LastClone);
                 return LastClone;
             }
             public void Dispose()
@@ -612,6 +622,111 @@ namespace DollyPaste
             AssertTrue(!WindowsClipboard.IsSupportedBitmapSize(1, -1), "Invalid bitmap dimensions are rejected before cloning");
         }
 
+        private static void RunDelayedImageRenderingTests()
+        {
+            Console.WriteLine("\n--- Delayed Image Rendering Tests ---");
+            using (Bitmap source = new Bitmap(4, 3))
+            {
+                source.SetPixel(1, 1, Color.Coral);
+                byte[] png = Convert.FromBase64String(ImagePayload.EncodePng(source));
+                foreach (uint imageFormat in new uint[] { TestPngFormat, 2 })
+                {
+                    using (MockCaptureNative mock = new MockCaptureNative())
+                    {
+                        if (imageFormat == TestPngFormat) mock.AddBytes(imageFormat, png);
+                        else mock.AddBitmap(source);
+                        mock.OnDataRead = delegate(uint format)
+                        {
+                            if (mock.DataReads.Count == 1) mock.FinalSequence = 101;
+                        };
+                        using (WindowsClipboard.ClipboardReadSnapshot snapshot = WindowsClipboard.ReadStableOpenedClipboardPayload(
+                            mock, 100, TestExcludeFormat, TestHistoryFormat, TestPngFormat, true))
+                        {
+                            AssertTrue(snapshot != null && snapshot.Sequence == 101,
+                                "Delayed image rendering is captured under its rendered sequence (format " + imageFormat + ")");
+                            AssertTrue(mock.DataReads.Count == 2, "Delayed image rendering retries its snapshot once");
+                            if (snapshot != null)
+                            {
+                                bool isImage;
+                                using (Bitmap decoded = ImagePayload.Decode(snapshot.GetValue(out isImage)))
+                                    AssertTrue(isImage && decoded != null && decoded.Width == 4 && decoded.Height == 3 &&
+                                        decoded.GetPixel(1, 1).ToArgb() == Color.Coral.ToArgb(),
+                                        "Retried image retains its PNG base64 pixels");
+                            }
+                            if (imageFormat == 2)
+                            {
+                                AssertTrue(mock.BitmapClones.Count == 2 && IsDisposedBitmap(mock.BitmapClones[0]),
+                                    "Unstable bitmap snapshot is disposed before the successful retry");
+                                AssertTrue(!IsDisposedBitmap(mock.LastClone), "Accepted bitmap remains alive until snapshot disposal");
+                            }
+                        }
+                        AssertTrue(mock.LockCount == mock.UnlockCount, "Delayed image rendering balances native locks");
+                        if (imageFormat == 2)
+                            AssertTrue(IsDisposedBitmap(mock.LastClone), "Successful delayed bitmap snapshot releases its owned clone");
+                    }
+                }
+
+                // A retried snapshot must recheck producer privacy metadata before touching image data again.
+                for (int scenario = 0; scenario < 3; scenario++)
+                {
+                    using (MockCaptureNative mock = new MockCaptureNative())
+                    {
+                        mock.AddBytes(TestPngFormat, png);
+                        mock.OnDataRead = delegate(uint format)
+                        {
+                            if (format != TestPngFormat) return;
+                            mock.FinalSequence = 101;
+                            if (scenario == 0) mock.AddBytes(TestExcludeFormat, new byte[0]);
+                            else mock.AddBytes(TestHistoryFormat, scenario == 1 ? BitConverter.GetBytes(0u) : new byte[2]);
+                        };
+                        using (WindowsClipboard.ClipboardReadSnapshot snapshot = WindowsClipboard.ReadStableOpenedClipboardPayload(
+                            mock, 100, TestExcludeFormat, TestHistoryFormat, TestPngFormat, true))
+                            AssertTrue(snapshot == null && mock.DataReads.FindAll(delegate(uint format) { return format == TestPngFormat; }).Count == 1,
+                                "Delayed-render retry respects new exclusion or invalid history metadata (scenario " + scenario + ")");
+                        AssertTrue(mock.LockCount == mock.UnlockCount, "Retry privacy rejection balances native locks");
+                    }
+                }
+
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.InitialSequence = 101;
+                    mock.FinalSequence = 101;
+                    mock.AddBytes(TestPngFormat, png);
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = WindowsClipboard.ReadStableOpenedClipboardPayload(
+                        mock, 100, TestExcludeFormat, TestHistoryFormat, TestPngFormat, true))
+                        AssertTrue(snapshot == null && mock.DataReads.Count == 0,
+                            "Stable reader rejects an initially obsolete sequence without reading the newer image");
+                }
+
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.AddBytes(TestPngFormat, new byte[33]);
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = WindowsClipboard.ReadStableOpenedClipboardPayload(
+                        mock, 100, TestExcludeFormat, TestHistoryFormat, TestPngFormat, true))
+                        AssertTrue(snapshot == null && mock.DataReads.Count == 1,
+                            "Invalid image at an unchanged sequence is not repeatedly read");
+                }
+
+                using (MockCaptureNative mock = new MockCaptureNative())
+                {
+                    mock.AddBitmap(source);
+                    mock.OnDataRead = delegate(uint format) { mock.FinalSequence++; };
+                    using (WindowsClipboard.ClipboardReadSnapshot snapshot = WindowsClipboard.ReadStableOpenedClipboardPayload(
+                        mock, 100, TestExcludeFormat, TestHistoryFormat, TestPngFormat, true))
+                        AssertTrue(snapshot == null && mock.DataReads.Count == 3,
+                            "Continuously changing clipboard rendering stops after three bounded reads");
+                    AssertTrue(mock.BitmapClones.Count == 3 && mock.BitmapClones.TrueForAll(IsDisposedBitmap),
+                        "All unstable bitmap snapshots are disposed when the retry bound is reached");
+                }
+            }
+        }
+
+        private static bool IsDisposedBitmap(Bitmap bitmap)
+        {
+            try { int width = bitmap.Width; return false; }
+            catch (ArgumentException) { return true; }
+        }
+
         private static void RunImageBase64PublicationTests()
         {
             Console.WriteLine("\n--- Image Base64 Publication Tests ---");
@@ -647,11 +762,158 @@ namespace DollyPaste
             }
         }
 
+        private static void RunImagePublicationTests()
+        {
+            Console.WriteLine("\n--- Native Image Publication Tests (synthetic clipboard only) ---");
+            using (Bitmap image = new Bitmap(3, 2, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                image.SetPixel(0, 0, Color.Red);
+                image.SetPixel(1, 0, Color.Lime);
+                image.SetPixel(2, 0, Color.FromArgb(0, 0, 0, 255));
+                image.SetPixel(0, 1, Color.Blue);
+                image.SetPixel(1, 1, Color.White);
+                image.SetPixel(2, 1, Color.Black);
+                string payload = ImagePayload.EncodePng(image);
+                MockPublicationNative mock = new MockPublicationNative();
+                try
+                {
+                    uint sequence;
+                    AssertTrue(WindowsClipboard.ExecuteImagePublication(mock, new IntPtr(1000), payload, out sequence),
+                        "Stored PNG publishes as an actual clipboard image");
+                    AssertTrue(sequence == mock.MockSequence, "Image publication returns its exact clipboard sequence");
+                    AssertTrue(mock.PublishedFormats.Count == 4 && mock.PublishedFormats[0] == 50001 &&
+                        mock.PublishedFormats[1] == 50002 && mock.PublishedFormats[2] == 50003 && mock.PublishedFormats[3] == 8,
+                        "Image publishes history/cloud exclusions before PNG and standard CF_DIB");
+                    AssertTrue(!mock.PublishedFormats.Contains(13), "Image copy does not publish Unicode text or base64");
+                    AssertTrue(Marshal.ReadInt32(mock.LockGlobal(mock.TransferredHandles[0])) == 0 &&
+                        Marshal.ReadInt32(mock.LockGlobal(mock.TransferredHandles[1])) == 0,
+                        "Image publication excludes both Windows clipboard history and cloud upload");
+                    byte[] png = Convert.FromBase64String(payload);
+                    byte[] actualPng = new byte[png.Length];
+                    Marshal.Copy(mock.LockGlobal(mock.TransferredHandles[2]), actualPng, 0, actualPng.Length);
+                    AssertTrue(Convert.ToBase64String(actualPng) == payload, "PNG clipboard bytes preserve the original encoded image and alpha");
+                    using (Bitmap decoded = ImagePayload.Decode(Convert.ToBase64String(actualPng)))
+                        AssertTrue(decoded.GetPixel(2, 0).A == 0, "PNG representation preserves fully transparent pixels");
+
+                    IntPtr dibPointer = mock.LockGlobal(mock.TransferredHandles[3]);
+                    byte[] dib = new byte[64];
+                    Marshal.Copy(dibPointer, dib, 0, dib.Length);
+                    AssertTrue(BitConverter.ToInt32(dib, 0) == 40 && BitConverter.ToInt32(dib, 4) == 3 &&
+                        BitConverter.ToInt32(dib, 8) == 2 && BitConverter.ToUInt16(dib, 12) == 1 &&
+                        BitConverter.ToUInt16(dib, 14) == 24 && BitConverter.ToInt32(dib, 16) == 0 &&
+                        BitConverter.ToInt32(dib, 20) == 24,
+                        "CF_DIB has valid 24bpp BITMAPINFOHEADER dimensions, compression and padded pixel size");
+                    AssertTrue(dib[40] == 255 && dib[41] == 0 && dib[42] == 0 &&
+                        dib[52] == 0 && dib[53] == 0 && dib[54] == 255,
+                        "CF_DIB pixels are correctly ordered bottom-up in BGR format");
+                    AssertTrue(dib[58] == 255 && dib[59] == 255 && dib[60] == 255,
+                        "Older DIB consumers receive transparent pixels composited onto white");
+                    AssertTrue(dib[49] == 0 && dib[50] == 0 && dib[51] == 0 &&
+                        dib[61] == 0 && dib[62] == 0 && dib[63] == 0,
+                        "DIB row padding is initialized and cannot expose unrelated memory");
+                    AssertTrue(mock.FreedHandles.Count == 0, "Windows owns all published image buffers after success");
+                    AssertTrue(mock.CallLog.IndexOf("GetClipboardSequenceNumber") < mock.CallLog.IndexOf("CloseClipboard"),
+                        "Image sequence is captured while the clipboard is open");
+                }
+                finally { mock.Cleanup(); }
+
+                foreach (uint registration in new uint[] { 1, 2, 3 })
+                {
+                    mock = new MockPublicationNative { FailAtFormat = registration };
+                    try
+                    {
+                        uint sequence;
+                        AssertTrue(!WindowsClipboard.ExecuteImagePublication(mock, IntPtr.Zero, payload, out sequence) &&
+                            sequence == 0 && !mock.CallLog.Contains("OpenClipboard") && mock.AllocatedHandles.Count == 0,
+                            "Image format registration failure preserves the clipboard (format " + registration + ")");
+                    }
+                    finally { mock.Cleanup(); }
+                }
+                for (int index = 0; index < 4; index++)
+                {
+                    foreach (bool failLock in new bool[] { false, true })
+                    {
+                        mock = new MockPublicationNative();
+                        if (failLock) mock.FailAtLockIndex = index; else mock.FailAtAllocIndex = index;
+                        try
+                        {
+                            uint sequence;
+                            AssertTrue(!WindowsClipboard.ExecuteImagePublication(mock, IntPtr.Zero, payload, out sequence) &&
+                                sequence == 0 && !mock.CallLog.Contains("OpenClipboard") &&
+                                mock.FreedHandles.Count == mock.AllocatedHandles.Count,
+                                "Image buffer " + (failLock ? "lock" : "allocation") + " failure cleans up before clipboard mutation (index " + index + ")");
+                        }
+                        finally { mock.Cleanup(); }
+                    }
+                }
+                foreach (uint format in new uint[] { 50001, 50002, 50003, 8 })
+                {
+                    mock = new MockPublicationNative { FailAtSetDataFormat = format };
+                    try
+                    {
+                        uint sequence;
+                        AssertTrue(!WindowsClipboard.ExecuteImagePublication(mock, IntPtr.Zero, payload, out sequence) && sequence == 0,
+                            "Image native publication failure is reported (format " + format + ")");
+                        AssertTrue(mock.AllocatedHandles.Count == mock.FreedHandles.Count + mock.TransferredHandles.Count &&
+                            mock.CallLog.FindAll(delegate(string call) { return call == "CloseClipboard"; }).Count == 1,
+                            "Image failure closes clipboard once and frees only untransferred buffers (format " + format + ")");
+                        foreach (IntPtr transferred in mock.TransferredHandles)
+                            AssertTrue(!mock.FreedHandles.Contains(transferred), "Transferred image buffers are never freed by the caller");
+                        if (format == 50001 || format == 50002)
+                            AssertTrue(!mock.PublishedFormats.Contains(50003) && !mock.PublishedFormats.Contains(8),
+                                "No image format is published after an exclusion-metadata failure");
+                    }
+                    finally { mock.Cleanup(); }
+                }
+                mock = new MockPublicationNative { FailOpenClipboard = true };
+                try
+                {
+                    uint sequence;
+                    AssertTrue(!WindowsClipboard.ExecuteImagePublication(mock, IntPtr.Zero, payload, out sequence) &&
+                        mock.CallLog.FindAll(delegate(string call) { return call == "OpenClipboard"; }).Count == 5 &&
+                        mock.FreedHandles.Count == 4 && !mock.CallLog.Contains("EmptyClipboard"),
+                        "Image clipboard contention retries five times then frees every buffer without emptying clipboard");
+                }
+                finally { mock.Cleanup(); }
+                mock = new MockPublicationNative { OpenFailuresRemaining = 2 };
+                try
+                {
+                    uint sequence;
+                    AssertTrue(WindowsClipboard.ExecuteImagePublication(mock, IntPtr.Zero, payload, out sequence) &&
+                        mock.CallLog.FindAll(delegate(string call) { return call == "OpenClipboard"; }).Count == 3,
+                        "Image publication succeeds after transient clipboard contention");
+                }
+                finally { mock.Cleanup(); }
+                mock = new MockPublicationNative { FailEmptyClipboard = true };
+                try
+                {
+                    uint sequence;
+                    AssertTrue(!WindowsClipboard.ExecuteImagePublication(mock, IntPtr.Zero, payload, out sequence) &&
+                        mock.FreedHandles.Count == 4 && mock.PublishedFormats.Count == 0 && mock.CallLog.Contains("CloseClipboard"),
+                        "Image EmptyClipboard failure releases every buffer and closes clipboard");
+                }
+                finally { mock.Cleanup(); }
+                foreach (string invalid in new string[] { null, "", "invalid PNG", Convert.ToBase64String(new byte[33]) })
+                {
+                    mock = new MockPublicationNative();
+                    try
+                    {
+                        uint sequence;
+                        AssertTrue(!WindowsClipboard.ExecuteImagePublication(mock, IntPtr.Zero, invalid, out sequence) &&
+                            mock.CallLog.Count == 0, "Invalid image is rejected before any native clipboard operation");
+                    }
+                    finally { mock.Cleanup(); }
+                }
+            }
+        }
+
         private sealed class MockPublicationNative : WindowsClipboard.IClipboardPublicationNative
         {
-            public uint FailAtFormat = 0; // 1 = history, 2 = cloud
+            public uint FailAtFormat = 0; // 1 = history, 2 = cloud, 3 = PNG
             public int FailAtAllocIndex = -1; // index of AllocGlobal to fail
+            public int FailAtLockIndex = -1;
             public bool FailOpenClipboard = false;
+            public int OpenFailuresRemaining;
             public bool FailEmptyClipboard = false;
             public uint FailAtSetDataFormat = 0; // format ID to fail SetClipboardData
 
@@ -663,6 +925,7 @@ namespace DollyPaste
 
             private readonly Dictionary<IntPtr, IntPtr> _memoryMap = new Dictionary<IntPtr, IntPtr>();
             private int _allocCounter = 100;
+            private int _lockCounter;
             public uint MockSequence = 42;
 
             public uint RegisterClipboardFormat(string formatName)
@@ -676,6 +939,7 @@ namespace DollyPaste
                 {
                     return FailAtFormat == 2 ? 0u : 50002u;
                 }
+                if (formatName == "PNG") return FailAtFormat == 3 ? 0u : 50003u;
                 return 50000u;
             }
 
@@ -706,6 +970,7 @@ namespace DollyPaste
 
             public IntPtr LockGlobal(IntPtr hMem)
             {
+                if (_lockCounter++ == FailAtLockIndex) return IntPtr.Zero;
                 if (_memoryMap.ContainsKey(hMem))
                 {
                     return _memoryMap[hMem];
@@ -721,6 +986,7 @@ namespace DollyPaste
             public bool OpenClipboard(IntPtr hwnd)
             {
                 CallLog.Add("OpenClipboard");
+                if (OpenFailuresRemaining > 0) { OpenFailuresRemaining--; return false; }
                 return !FailOpenClipboard;
             }
 

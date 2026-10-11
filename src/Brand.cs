@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
 
 namespace DollyPaste
 {
@@ -12,47 +13,56 @@ namespace DollyPaste
     {
         public const string AppName = "Dolly Paste";
 
-        // --- Color Palette ---
-        // Warm wool / off-white canvas
-        public static readonly Color WarmWoolCanvas = Color.FromArgb(250, 248, 245);
-        public static readonly Color WarmWoolCard = Color.FromArgb(255, 255, 255);
-        public static readonly Color CardSelected = Color.FromArgb(235, 243, 237);
-        public static readonly Color CardHover = Color.FromArgb(244, 241, 234);
+        // Smet Software Solutions' website tokens (smetsoftwaresolutions.be).
+        // Native controls retain the same system typography without web assets.
+        public static readonly Color Canvas = Color.FromArgb(243, 247, 252);
+        public static readonly Color Surface = Color.White;
+        public static readonly Color HeaderBlue = Color.FromArgb(1, 82, 154);
+        public static readonly Color HeaderHover = Color.FromArgb(18, 103, 191);
+        public static readonly Color Accent = Color.FromArgb(26, 115, 232);
+        public static readonly Color AccentHover = Color.FromArgb(21, 87, 176);
+        public static readonly Color AccentSoft = Color.FromArgb(232, 240, 254);
+        public static readonly Color Hero = Color.FromArgb(16, 23, 37);
+
+        // Compatibility aliases for existing renderers and the sheep artwork.
+        public static readonly Color WarmWoolCanvas = Canvas;
+        public static readonly Color WarmWoolCard = Surface;
+        public static readonly Color CardSelected = AccentSoft;
+        public static readonly Color CardHover = Color.FromArgb(241, 243, 244);
 
         // Dark ink left rail
-        public static readonly Color DarkInkRail = Color.FromArgb(31, 36, 43);
+        public static readonly Color DarkInkRail = Hero;
         public static readonly Color DarkInkRailHover = Color.FromArgb(40, 47, 56);
         public static readonly Color DarkInkRailActive = Color.FromArgb(50, 59, 71);
         public static readonly Color DarkInkText = Color.FromArgb(240, 242, 245);
         public static readonly Color DarkInkTextMuted = Color.FromArgb(157, 167, 179);
 
-        // Muted moss-green accents
-        public static readonly Color MossGreen = Color.FromArgb(66, 104, 78);
-        public static readonly Color MossGreenHover = Color.FromArgb(81, 124, 95);
-        public static readonly Color MossGreenLight = Color.FromArgb(234, 242, 236);
-        public static readonly Color MossGreenDark = Color.FromArgb(43, 71, 52);
+        public static readonly Color MossGreen = Accent;
+        public static readonly Color MossGreenHover = AccentHover;
+        public static readonly Color MossGreenLight = AccentSoft;
+        public static readonly Color MossGreenDark = AccentHover;
 
         // Borders and dividers
-        public static readonly Color Border = Color.FromArgb(226, 222, 214);
-        public static readonly Color BorderLight = Color.FromArgb(238, 234, 227);
+        public static readonly Color Border = Color.FromArgb(218, 226, 237);
+        public static readonly Color BorderLight = Color.FromArgb(225, 232, 241);
 
         // Content typography
-        public static readonly Color TextPrimary = Color.FromArgb(32, 36, 40);
-        public static readonly Color TextSecondary = Color.FromArgb(110, 118, 129);
-        public static readonly Color TextMuted = Color.FromArgb(149, 157, 165);
+        public static readonly Color TextPrimary = Color.FromArgb(32, 33, 36);
+        public static readonly Color TextSecondary = Color.FromArgb(95, 99, 104);
+        public static readonly Color TextMuted = Color.FromArgb(112, 117, 122);
 
         // Badges: Kind and Sensitive
-        public static readonly Color KindTextBg = Color.FromArgb(240, 237, 230);
-        public static readonly Color KindTextFg = Color.FromArgb(92, 88, 79);
+        public static readonly Color KindTextBg = Color.FromArgb(241, 243, 244);
+        public static readonly Color KindTextFg = TextSecondary;
 
-        public static readonly Color KindLinkBg = Color.FromArgb(230, 242, 242);
-        public static readonly Color KindLinkFg = Color.FromArgb(24, 100, 112);
+        public static readonly Color KindLinkBg = AccentSoft;
+        public static readonly Color KindLinkFg = AccentHover;
 
         public static readonly Color KindCodeBg = Color.FromArgb(236, 233, 245);
         public static readonly Color KindCodeFg = Color.FromArgb(82, 65, 130);
 
-        public static readonly Color SensitiveBg = Color.FromArgb(253, 235, 234);
-        public static readonly Color SensitiveFg = Color.FromArgb(169, 50, 38);
+        public static readonly Color SensitiveBg = Color.FromArgb(252, 232, 230);
+        public static readonly Color SensitiveFg = Color.FromArgb(217, 48, 37);
 
         public static readonly Color WarningBannerBg = Color.FromArgb(254, 249, 231);
         public static readonly Color WarningBannerFg = Color.FromArgb(143, 102, 17);
@@ -60,6 +70,24 @@ namespace DollyPaste
         // --- Fonts ---
         private static readonly string FontFamilyName = "Segoe UI";
         private static readonly string CodeFontFamilyName = "Consolas";
+
+        public static void StyleButton(Button button, bool primary)
+        {
+            if (button == null) throw new ArgumentNullException("button");
+            button.UseVisualStyleBackColor = false;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = primary ? 0 : 1;
+            button.FlatAppearance.BorderColor = Border;
+            button.BackColor = primary ? Accent : Surface;
+            button.ForeColor = primary ? Color.White : TextPrimary;
+            button.FlatAppearance.MouseOverBackColor = primary ? AccentHover : CardHover;
+            button.FlatAppearance.MouseDownBackColor = primary ? AccentHover : AccentSoft;
+            button.Cursor = Cursors.Hand;
+            button.TextAlign = ContentAlignment.MiddleCenter;
+            BrandButton brandButton = button as BrandButton;
+            if (brandButton != null) brandButton.SetPrimaryRole(primary);
+            button.Invalidate();
+        }
 
         public static Font CreateFont(float sizePt, FontStyle style)
         {
@@ -83,6 +111,98 @@ namespace DollyPaste
             {
                 return new Font(FontFamily.GenericMonospace, sizePt, FontStyle.Regular);
             }
+        }
+
+        // Small native line icons stay sharp without an image dependency or symbol-font fallback.
+        public static void DrawIcon(Graphics graphics, string name, Rectangle bounds, Color color)
+        {
+            if (graphics == null || string.IsNullOrEmpty(name) || bounds.Width < 2 || bounds.Height < 2) return;
+            GraphicsState saved = graphics.Save();
+            try
+            {
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.TranslateTransform(bounds.Left, bounds.Top);
+                graphics.ScaleTransform(bounds.Width / 20f, bounds.Height / 20f);
+                using (Pen pen = new Pen(color, 1.5f))
+                {
+                    pen.StartCap = LineCap.Round;
+                    pen.EndCap = LineCap.Round;
+                    pen.LineJoin = LineJoin.Round;
+                    switch (name)
+                    {
+                        case "close":
+                            graphics.DrawLine(pen, 5, 5, 15, 15);
+                            graphics.DrawLine(pen, 15, 5, 5, 15);
+                            break;
+                        case "search":
+                            graphics.DrawEllipse(pen, 3, 3, 10, 10);
+                            graphics.DrawLine(pen, 12, 12, 17, 17);
+                            break;
+                        case "copy":
+                            graphics.DrawRectangle(pen, 7, 7, 10, 10);
+                            graphics.DrawLines(pen, new[] { new Point(4, 13), new Point(3, 13), new Point(3, 3), new Point(13, 3), new Point(13, 4) });
+                            break;
+                        case "pin":
+                            graphics.DrawLines(pen, new[] { new Point(7, 3), new Point(13, 3), new Point(12, 8), new Point(15, 11), new Point(5, 11), new Point(8, 8), new Point(7, 3) });
+                            graphics.DrawLine(pen, 10, 11, 10, 18);
+                            break;
+                        case "preview":
+                            graphics.DrawLines(pen, new[] { new Point(11, 3), new Point(17, 3), new Point(17, 9) });
+                            graphics.DrawLine(pen, 17, 3, 11, 9);
+                            graphics.DrawLines(pen, new[] { new Point(9, 17), new Point(3, 17), new Point(3, 11) });
+                            graphics.DrawLine(pen, 3, 17, 9, 11);
+                            break;
+                        case "trash":
+                            graphics.DrawLine(pen, 3, 5, 17, 5);
+                            graphics.DrawLines(pen, new[] { new Point(7, 5), new Point(7, 2), new Point(13, 2), new Point(13, 5) });
+                            graphics.DrawLines(pen, new[] { new Point(5, 7), new Point(6, 17), new Point(14, 17), new Point(15, 7) });
+                            graphics.DrawLine(pen, 8, 8, 8, 14);
+                            graphics.DrawLine(pen, 12, 8, 12, 14);
+                            break;
+                        case "settings":
+                            graphics.DrawLine(pen, 3, 6, 9, 6);
+                            graphics.DrawLine(pen, 14, 6, 17, 6);
+                            graphics.DrawEllipse(pen, 9, 3.5f, 5, 5);
+                            graphics.DrawLine(pen, 3, 14, 6, 14);
+                            graphics.DrawLine(pen, 11, 14, 17, 14);
+                            graphics.DrawEllipse(pen, 6, 11.5f, 5, 5);
+                            break;
+                        case "pause":
+                            graphics.DrawRectangle(pen, 5, 3, 3, 14);
+                            graphics.DrawRectangle(pen, 12, 3, 3, 14);
+                            break;
+                        case "play":
+                            graphics.DrawPolygon(pen, new[] { new Point(6, 3), new Point(16, 10), new Point(6, 17) });
+                            break;
+                        case "text":
+                            graphics.DrawLine(pen, 4, 4, 16, 4);
+                            graphics.DrawLine(pen, 10, 4, 10, 17);
+                            graphics.DrawLine(pen, 7, 17, 13, 17);
+                            break;
+                        case "link":
+                            graphics.DrawArc(pen, 3, 9, 8, 8, 45, 270);
+                            graphics.DrawArc(pen, 9, 3, 8, 8, 225, 270);
+                            graphics.DrawLine(pen, 7, 13, 13, 7);
+                            break;
+                        case "code":
+                            graphics.DrawLines(pen, new[] { new Point(6, 5), new Point(2, 10), new Point(6, 15) });
+                            graphics.DrawLines(pen, new[] { new Point(14, 5), new Point(18, 10), new Point(14, 15) });
+                            break;
+                        case "image":
+                            graphics.DrawRectangle(pen, 2, 3, 16, 14);
+                            graphics.DrawEllipse(pen, 5, 6, 3, 3);
+                            graphics.DrawLines(pen, new[] { new Point(3, 16), new Point(9, 10), new Point(13, 14), new Point(16, 11), new Point(18, 13) });
+                            break;
+                        case "binary":
+                            graphics.DrawRectangle(pen, 3, 3, 4, 5);
+                            graphics.DrawLine(pen, 14, 3, 14, 8);
+                            graphics.DrawLine(pen, 5, 12, 5, 17);
+                            graphics.DrawRectangle(pen, 12, 12, 4, 5);
+                            break;
+                    }
+                }
+            }
+            finally { graphics.Restore(saved); }
         }
 
         // --- Win32 Native Icon Management ---
@@ -340,6 +460,172 @@ namespace DollyPaste
             if (string.Equals(kind, "LINK", StringComparison.OrdinalIgnoreCase)) return KindLinkFg;
             if (string.Equals(kind, "CODE", StringComparison.OrdinalIgnoreCase)) return KindCodeFg;
             return KindTextFg;
+        }
+    }
+
+    // A native Button keeps its keyboard, default-button and accessibility
+    // behavior; only its rendering changes. No timers, bitmaps or per-paint fonts.
+    public sealed class BrandButton : Button
+    {
+        private bool _hovered;
+        private bool _pressed;
+        private bool _primary;
+        private string _iconName;
+        private bool _hideText;
+        private float _cornerRadius = 8f;
+
+        public string IconName
+        {
+            get { return _iconName; }
+            set { _iconName = value; Invalidate(); }
+        }
+
+        // Keep Text available to accessibility, keyboard mnemonics, and automation.
+        public bool HideText
+        {
+            get { return _hideText; }
+            set { _hideText = value; Invalidate(); }
+        }
+
+        public float CornerRadius
+        {
+            get { return _cornerRadius; }
+            set { _cornerRadius = Math.Max(1f, value); Invalidate(); }
+        }
+
+        public BrandButton()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Brand.StyleButton(this, false);
+        }
+
+        public bool IsPrimary
+        {
+            get { return _primary; }
+            set { Brand.StyleButton(this, value); }
+        }
+
+        internal void SetPrimaryRole(bool primary)
+        {
+            _primary = primary;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Color parentColor = Parent != null ? Parent.BackColor : Brand.Surface;
+            if (parentColor.A == 0) parentColor = Brand.Surface;
+            e.Graphics.Clear(parentColor);
+            if (Width < 2 || Height < 2) return;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+            Color fill = !Enabled ? Brand.CardHover :
+                (_pressed ? FlatAppearance.MouseDownBackColor :
+                (_hovered ? FlatAppearance.MouseOverBackColor : BackColor));
+            Color text = Enabled ? ForeColor : Brand.TextMuted;
+            RectangleF bounds = new RectangleF(0.5f, 0.5f, Math.Max(0, Width - 1), Math.Max(0, Height - 1));
+            using (GraphicsPath path = Brand.CreateRoundedPath(bounds, Math.Min(_cornerRadius, Height / 2f)))
+            using (SolidBrush brush = new SolidBrush(fill))
+            {
+                e.Graphics.FillPath(brush, path);
+                if (FlatAppearance.BorderSize > 0)
+                {
+                    using (Pen pen = new Pen(Enabled ? FlatAppearance.BorderColor : Brand.Border, 1))
+                        e.Graphics.DrawPath(pen, path);
+                }
+            }
+
+            Rectangle textBounds = new Rectangle(5, 2, Math.Max(0, Width - 10), Math.Max(0, Height - 4));
+            TextFormatFlags flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding;
+            if (!UseMnemonic) flags |= TextFormatFlags.NoPrefix;
+            else if (!ShowKeyboardCues) flags |= TextFormatFlags.HidePrefix;
+            if (!string.IsNullOrEmpty(_iconName))
+            {
+                int iconSize = Math.Max(1, Math.Min(16, Math.Min(Width - 8, Height - 8)));
+                int iconLeft = (Width - iconSize) / 2;
+                if (!_hideText && !string.IsNullOrEmpty(Text))
+                {
+                    int textWidth = TextRenderer.MeasureText(e.Graphics, Text, Font, Size.Empty,
+                        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+                    int groupWidth = Math.Min(Math.Max(1, Width - 14), iconSize + 6 + textWidth);
+                    iconLeft = Math.Max(5, (Width - groupWidth) / 2);
+                    textBounds.X = iconLeft + iconSize + 6;
+                    textBounds.Width = Math.Max(0, Width - textBounds.X - 7);
+                    flags &= ~TextFormatFlags.HorizontalCenter;
+                    flags |= TextFormatFlags.Left;
+                }
+                Brand.DrawIcon(e.Graphics, _iconName, new Rectangle(iconLeft, (Height - iconSize) / 2, iconSize, iconSize), text);
+            }
+            if (!_hideText) TextRenderer.DrawText(e.Graphics, Text, Font, textBounds, text, flags);
+            if (Focused && ShowFocusCues)
+            {
+                Rectangle focus = new Rectangle(7, 5, Math.Max(0, Width - 14), Math.Max(0, Height - 10));
+                ControlPaint.DrawFocusRectangle(e.Graphics, focus, text, fill);
+            }
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            _hovered = true;
+            Invalidate();
+            base.OnMouseEnter(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            _hovered = false;
+            _pressed = false;
+            Invalidate();
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left) _pressed = true;
+            Invalidate();
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            _pressed = false;
+            Invalidate();
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Space) _pressed = true;
+            Invalidate();
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnKeyUp(KeyEventArgs e)
+        {
+            _pressed = false;
+            Invalidate();
+            base.OnKeyUp(e);
+        }
+
+        protected override void OnGotFocus(EventArgs e)
+        {
+            Invalidate();
+            base.OnGotFocus(e);
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            _pressed = false;
+            Invalidate();
+            base.OnLostFocus(e);
+        }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            if (!Enabled) { _hovered = false; _pressed = false; }
+            Invalidate();
+            base.OnEnabledChanged(e);
         }
     }
 }

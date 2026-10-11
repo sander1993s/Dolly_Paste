@@ -14,6 +14,13 @@ namespace DollyPaste
         Pinned
     }
 
+    internal enum ImageCopyTarget { Image, OcrText, Base64 }
+
+    internal sealed class ClipListBox : ListBox
+    {
+        internal ClipListBox() { DoubleBuffered = true; }
+    }
+
     /// <summary>
     /// Text box with customizable clipboard behavior to enforce Dolly Paste privacy contracts.
     /// In demo/preview modes, all native clipboard operations (WM_COPY, WM_CUT, WM_PASTE) are suppressed.
@@ -137,6 +144,8 @@ namespace DollyPaste
         private List<ClipEntry> _allClips;
         private List<ClipEntry> _displayedClips;
         private Guid? _selectedClipId;
+        private ImageCopyTarget _imageCopyTarget = ImageCopyTarget.Image;
+        private bool _changingListItems;
         private NavMode _currentNav;
         private string _currentKindFilter;
 
@@ -153,9 +162,14 @@ namespace DollyPaste
         private Panel _pnlDemoBanner;
         private Panel _pnlHeader;
         private Label _lblHeaderTitle;
+        private Button _btnClose;
         private Button _btnPauseResume;
 
         private Panel _pnlSearchFilter;
+        private Panel _pnlSearchBox;
+        private Panel _pnlTypeFilters;
+        private Label _lblClipCount;
+        private Label _lblFormatHint;
         private TextBox _txtSearch;
         private Button _btnFilterAll;
         private Button _btnFilterText;
@@ -185,6 +199,11 @@ namespace DollyPaste
         private TextBox _txtPreview;
         private Panel _pnlImagePreview;
         private PictureBox _picImagePreview;
+        private Panel _pnlOcrPreview;
+        private TextBox _txtOcrPreview;
+        private Panel _pnlImageActions;
+        private Button _btnCopyImageBase64;
+        private Button _btnCopyImageText;
         private Guid? _previewImageId;
         private readonly Dictionary<Guid, Bitmap> _imageThumbnails = new Dictionary<Guid, Bitmap>();
         private const int MaxCachedImageThumbnails = 64;
@@ -274,7 +293,7 @@ namespace DollyPaste
             _fontPreviewCode = Brand.CreateCodeFont(9.5f);
             _fontPreviewItalic = Brand.CreateFont(9.0f, FontStyle.Italic);
 
-            _fontHeaderTitle = Brand.CreateFont(11f, FontStyle.Bold);
+            _fontHeaderTitle = Brand.CreateFont(10.5f, FontStyle.Bold);
             _fontNavBold = Brand.CreateFont(9.5f, FontStyle.Bold);
             _fontRegular90 = Brand.CreateFont(9.0f, FontStyle.Regular);
             _fontBold90 = Brand.CreateFont(9.0f, FontStyle.Bold);
@@ -316,7 +335,9 @@ namespace DollyPaste
         {
             this.AutoScaleMode = AutoScaleMode.None;
             this.Text = "Dolly Paste";
-            this.FormBorderStyle = FormBorderStyle.SizableToolWindow;
+            this.FormBorderStyle = FormBorderStyle.None;
+            // Reserve a narrow, uncovered edge for native resize hit testing.
+            this.Padding = new Padding(5);
             this.ShowInTaskbar = false;
             this.MinimizeBox = false;
             this.MaximizeBox = false;
@@ -332,7 +353,7 @@ namespace DollyPaste
             }
             Rectangle workArea = (screen != null) ? screen.WorkingArea : Screen.PrimaryScreen.WorkingArea;
             Size initialSize, minSize;
-            ClampWindowSize(workArea, new Size(420, 520), new Size(380, 420), out initialSize, out minSize);
+            ClampWindowSize(workArea, new Size(480, 520), new Size(420, 460), out initialSize, out minSize);
             this.Size = initialSize;
             this.MinimumSize = minSize;
 
@@ -348,93 +369,137 @@ namespace DollyPaste
         {
             SuspendLayout();
             _toolTip = new ToolTip();
-            _pnlMain = new Panel { Dock = DockStyle.Fill, BackColor = Brand.WarmWoolCanvas };
-            _pnlHeader = new Panel { Dock = DockStyle.Top, Height = 48 };
+            _pnlMain = new Panel { Dock = DockStyle.Fill, BackColor = Brand.Canvas };
+            _pnlHeader = new Panel { Dock = DockStyle.Top, Height = 41, BackColor = Brand.HeaderBlue };
             _pnlHeader.Paint += delegate(object sender, PaintEventArgs e)
             {
-                Brand.DrawSheep(e.Graphics, new RectangleF(12, 8, 32, 32));
+                Brand.DrawSheep(e.Graphics, HeaderSheepBounds);
             };
+            _pnlHeader.MouseDown += OnTitleBarMouseDown;
             _lblHeaderTitle = new Label { Text = "Dolly Paste", Font = _fontHeaderTitle,
-                ForeColor = Brand.TextPrimary, Location = new Point(50, 14), AutoSize = true };
-            _btnPauseResume = CreateActionButton("Pause", 62, OnPauseResumeClicked);
-            _btnPauseResume.AccessibleName = "Toggle pause recording";
-            _btnSettings = CreateActionButton("Settings", 72, delegate { OpenSettings(); });
-            _btnSettings.AccessibleName = "Open settings dialog";
-            _pnlHeader.Controls.AddRange(new Control[] { _lblHeaderTitle, _btnPauseResume, _btnSettings });
+                ForeColor = Color.White, Location = new Point(47, 9), AutoSize = true };
+            _lblHeaderTitle.MouseDown += OnTitleBarMouseDown;
+            _btnClose = CreateActionButton("Close", 32, delegate { Close(); });
+            ConfigureIconButton(_btnClose, "close", true);
+            _btnClose.BackColor = Brand.HeaderBlue;
+            _btnClose.ForeColor = Color.White;
+            _btnClose.FlatAppearance.MouseOverBackColor = Brand.HeaderHover;
+            _btnClose.FlatAppearance.MouseDownBackColor = Brand.HeaderHover;
+            _btnClose.AccessibleName = "Close window";
+            _toolTip.SetToolTip(_btnClose, "Hide to tray (Esc)");
+            _pnlHeader.Controls.AddRange(new Control[] { _lblHeaderTitle, _btnClose });
             _pnlHeader.Resize += delegate { UpdateHeaderLayout(); };
 
-            _pnlSearchFilter = new Panel { Dock = DockStyle.Top, Height = 80 };
+            _pnlSearchFilter = new Panel { Dock = DockStyle.Top, Height = 51, BackColor = Brand.HeaderBlue };
+            _pnlSearchBox = new Panel { Height = 36, BackColor = Brand.HeaderBlue };
+            _pnlSearchBox.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                DrawRoundedCard(e.Graphics, _pnlSearchBox.ClientRectangle, Brand.Surface,
+                    _txtSearch.Focused ? Brand.AccentSoft : Brand.Surface, false);
+                Brand.DrawIcon(e.Graphics, "search", new Rectangle(10, 10, 16, 16), Brand.TextMuted);
+            };
+            _pnlSearchBox.Click += delegate { _txtSearch.Focus(); };
             _txtSearch = new PrivacyTextBox(_isDemoMode || _isPreviewMode, delegate { CopySelectedClip(); }, true);
-            _txtSearch.SetBounds(12, 4, ClientSize.Width - 24, 26);
-            _txtSearch.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
+            _txtSearch.BorderStyle = BorderStyle.None;
+            _txtSearch.BackColor = Brand.Surface;
+            _txtSearch.ForeColor = Brand.TextPrimary;
             _txtSearch.Font = _fontPreviewRegular;
             _txtSearch.AccessibleName = "Search clips";
             _txtSearch.TextChanged += delegate { ApplyFilters(); };
+            _txtSearch.GotFocus += delegate { _pnlSearchBox.Invalidate(); };
+            _txtSearch.LostFocus += delegate { _pnlSearchBox.Invalidate(); };
             _txtSearch.HandleCreated += delegate
             {
-                SendMessage(_txtSearch.Handle, 0x1501, new IntPtr(1), "Search clipboard history...");
+                SendMessage(_txtSearch.Handle, 0x1501, new IntPtr(1), "Search clipboard...");
             };
-            _pnlSearchFilter.Controls.Add(_txtSearch);
-            _pnlSearchFilter.Resize += delegate
-            {
-                UpdateSearchFilterLayout();
-            };
+            _toolTip.SetToolTip(_txtSearch, "Search clipboard history (Ctrl+F)");
+            _pnlSearchBox.Controls.Add(_txtSearch);
+            _pnlSearchFilter.Controls.Add(_pnlSearchBox);
+            _pnlSearchFilter.Resize += delegate { UpdateSearchFilterLayout(); };
 
-            _btnNavAll = CreateActionButton("All", 64, delegate
+            _btnNavAll = CreateActionButton("All", 42, delegate
             {
                 _currentNav = NavMode.All;
                 UpdateNavStyles();
                 ApplyFilters();
             });
-            _btnNavPinned = CreateActionButton("Pinned", 72, delegate
+            _btnNavPinned = CreateActionButton("Pinned", 60, delegate
             {
                 _currentNav = NavMode.Pinned;
                 UpdateNavStyles();
                 ApplyFilters();
             });
             _pnlSearchFilter.Controls.AddRange(new Control[] { _btnNavAll, _btnNavPinned });
-            int filterX = 12;
-            _btnFilterAll = CreateFilterPill("Any", null, 40, ref filterX);
-            _btnFilterText = CreateFilterPill("Text", "TEXT", 42, ref filterX);
-            _btnFilterLink = CreateFilterPill("Links", "LINK", 44, ref filterX);
-            _btnFilterCode = CreateFilterPill("Code", "CODE", 44, ref filterX);
-            _btnFilterImage = CreateFilterPill("Images", "IMAGE", 60, ref filterX);
+            _pnlTypeFilters = new Panel { Dock = DockStyle.Top, Height = 40, BackColor = Brand.Surface };
+            _pnlTypeFilters.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                using (Pen pen = new Pen(Brand.BorderLight))
+                    e.Graphics.DrawLine(pen, 0, _pnlTypeFilters.Height - 1, _pnlTypeFilters.Width, _pnlTypeFilters.Height - 1);
+            };
+            int filterX = 9;
+            _btnFilterAll = CreateFilterPill("Any", null, 44, ref filterX);
+            _btnFilterText = CreateFilterPill("Text", "TEXT", 46, ref filterX);
+            _btnFilterLink = CreateFilterPill("Links", "LINK", 49, ref filterX);
+            _btnFilterCode = CreateFilterPill("Code", "CODE", 49, ref filterX);
+            _btnFilterImage = CreateFilterPill("Images", "IMAGE", 63, ref filterX);
+            _lblClipCount = new Label { Font = _fontRegular80, ForeColor = Brand.TextMuted,
+                TextAlign = ContentAlignment.MiddleRight, Anchor = AnchorStyles.Right | AnchorStyles.Top };
+            _pnlTypeFilters.Controls.Add(_lblClipCount);
+            _pnlTypeFilters.Resize += delegate
+            {
+                _lblClipCount.SetBounds(_pnlTypeFilters.Width - 90, 5, 76, 30);
+            };
             _toolTip.SetToolTip(_btnFilterAll, "Show every content type");
-            UpdateSearchFilterLayout();
 
-            _pnlContent = new Panel { Dock = DockStyle.Fill };
+            _pnlContent = new Panel { Dock = DockStyle.Fill, BackColor = Brand.Canvas };
             InitializeDetailPane();
             _pnlDetail.Dock = DockStyle.Bottom;
             _pnlDetail.Height = 168;
             _pnlDetail.Visible = false;
-            // Actions stay reachable even when the optional preview is collapsed.
             _pnlDetailToolbar.Parent = _pnlMain;
             _pnlDetailToolbar.Dock = DockStyle.Bottom;
-            _pnlDetailToolbar.Height = 48;
-            _btnCopy.Text = "Copy";
-            _btnCopy.SetBounds(12, 9, 78, 30);
-            _btnPin.SetBounds(96, 9, 76, 30);
-            _btnDelete.SetBounds(178, 9, 64, 30);
-            _btnPreview = CreateActionButton("Preview", 80, delegate { TogglePreview(); });
-            _btnPreview.SetBounds(248, 9, 80, 30);
+            _pnlDetailToolbar.Height = 52;
+            _btnCopy.Text = "Copy text";
+            ((BrandButton)_btnCopy).IconName = "copy";
+            _btnCopy.BackColor = Brand.HeaderBlue;
+            _btnCopy.FlatAppearance.MouseOverBackColor = Brand.HeaderHover;
+            _btnCopy.FlatAppearance.MouseDownBackColor = Brand.HeaderHover;
+            _btnCopy.SetBounds(9, 9, 130, 34);
+            ConfigureIconButton(_btnPin, "pin", true);
+            ConfigureIconButton(_btnDelete, "trash", true);
+            _btnPin.SetBounds(145, 9, 34, 34);
+            _btnDelete.SetBounds(221, 9, 34, 34);
+            _btnPreview = CreateActionButton("Preview", 34, delegate { TogglePreview(); });
+            ConfigureIconButton(_btnPreview, "preview", true);
+            _btnPreview.SetBounds(183, 9, 34, 34);
             _btnPreview.AccessibleName = "Toggle clip preview";
-            _pnlDetailToolbar.Controls.Add(_btnPreview);
+            _lblFormatHint = new Label { Font = _fontRegular80, ForeColor = Brand.TextMuted,
+                TextAlign = ContentAlignment.MiddleRight, Text = "← → format", Visible = false };
+            _pnlDetailToolbar.Controls.AddRange(new Control[] { _btnPreview, _lblFormatHint });
+            _pnlDetailToolbar.Resize += delegate
+            {
+                _lblFormatHint.SetBounds(Math.Max(260, _pnlDetailToolbar.Width - 108), 9,
+                    Math.Max(0, Math.Min(94, _pnlDetailToolbar.Width - 274)), 34);
+            };
             _toolTip.SetToolTip(_btnPreview, "Show or hide preview (Ctrl+Space)");
             _toolTip.SetToolTip(_btnPin, "Pin or unpin selected clip (Ctrl+P)");
+            _toolTip.SetToolTip(_btnDelete, "Delete selected clip (Delete)");
             _toolTip.SetToolTip(_btnCopy, "Copy selected clip and close (Enter or Ctrl+C)");
 
-            _pnlListContainer = new Panel { Dock = DockStyle.Fill };
-            _listBoxClips = new ListBox { Dock = DockStyle.Fill, DrawMode = DrawMode.OwnerDrawFixed,
-                ItemHeight = 54, BorderStyle = BorderStyle.None, BackColor = Brand.WarmWoolCanvas,
+            _pnlListContainer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 6, 0, 4), BackColor = Brand.Canvas };
+            _listBoxClips = new ClipListBox { Dock = DockStyle.Fill, DrawMode = DrawMode.OwnerDrawVariable,
+                ItemHeight = 42, BorderStyle = BorderStyle.None, BackColor = Brand.Canvas,
                 IntegralHeight = false, AccessibleName = "Clipboard history items" };
+            _listBoxClips.MeasureItem += OnListBoxMeasureItem;
             _listBoxClips.DrawItem += OnListBoxDrawItem;
             _listBoxClips.SelectedIndexChanged += OnListBoxSelectedIndexChanged;
             _listBoxClips.KeyDown += OnListBoxKeyDown;
+            _listBoxClips.MouseDown += OnClipsMouseDown;
             _listBoxClips.DoubleClick += delegate { CopySelectedClip(); };
-            _toolTip.SetToolTip(_listBoxClips, "Double-click a clip to copy and close.");
+            _toolTip.SetToolTip(_listBoxClips, "Up/Down selects a clip. For images, Left/Right selects Image, Text or Base64. Enter copies.");
             _pnlListContainer.Controls.Add(_listBoxClips);
 
-            _pnlEmptyState = new Panel { Dock = DockStyle.Fill, BackColor = Brand.WarmWoolCanvas, Visible = false };
+            _pnlEmptyState = new Panel { Dock = DockStyle.Fill, BackColor = Brand.Canvas, Visible = false };
             _lblEmptyTitle = new Label { Font = _fontHeaderTitle, ForeColor = Brand.TextPrimary,
                 TextAlign = ContentAlignment.MiddleCenter };
             _lblEmptySubtitle = new Label { Font = _fontRegular90, ForeColor = Brand.TextSecondary,
@@ -446,30 +511,43 @@ namespace DollyPaste
             _pnlContent.Controls.Add(_pnlDetail);
             _pnlContent.Resize += delegate { UpdatePreviewHeight(); };
 
-            _pnlStatusBar = new Panel { Dock = DockStyle.Bottom, Height = 28, Padding = new Padding(12, 0, 12, 0) };
-            _lblStatusLeft = new Label { Dock = DockStyle.Fill, Font = _fontRegular80,
-                ForeColor = Brand.TextSecondary, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
-            _lblStatusRight = new Label { Dock = DockStyle.Right, Width = 64, Font = _fontRegular80,
-                ForeColor = Brand.TextSecondary, TextAlign = ContentAlignment.MiddleRight };
-            _lblToast = new Label { Dock = DockStyle.Fill, Font = _fontBold80, ForeColor = Brand.MossGreen,
+            _pnlStatusBar = new Panel { Dock = DockStyle.Bottom, Height = 31, BackColor = Brand.Surface };
+            _lblStatusRight = new Label { Font = _fontRegular80, ForeColor = Brand.TextMuted,
+                TextAlign = ContentAlignment.MiddleLeft };
+            _lblStatusLeft = new Label { Font = _fontRegular80, ForeColor = Brand.TextMuted,
+                AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+            _lblToast = new Label { Font = _fontBold80, ForeColor = Brand.HeaderBlue,
                 AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Visible = false };
-            _pnlStatusBar.Controls.AddRange(new Control[] { _lblStatusLeft, _lblToast, _lblStatusRight });
-            _toolTip.SetToolTip(_pnlStatusBar, "Ctrl+Shift+V opens Dolly Paste. Clips stay on this device.");
+            _btnPauseResume = CreateActionButton("Pause", 80, OnPauseResumeClicked);
+            ConfigureIconButton(_btnPauseResume, "pause", false);
+            _btnPauseResume.AccessibleName = "Toggle pause recording";
+            _btnSettings = CreateActionButton("Settings", 30, delegate { OpenSettings(); });
+            ConfigureIconButton(_btnSettings, "settings", true);
+            _btnSettings.AccessibleName = "Open settings dialog";
+            _toolTip.SetToolTip(_btnPauseResume, "Pause or resume clipboard recording");
+            _toolTip.SetToolTip(_btnSettings, "Settings");
+            _pnlStatusBar.Controls.AddRange(new Control[] { _lblStatusLeft, _lblToast, _lblStatusRight, _btnPauseResume, _btnSettings });
+            _pnlStatusBar.Resize += delegate { UpdateFooterLayout(); };
+            _toolTip.SetToolTip(_pnlStatusBar, "Ctrl+Shift+V opens Dolly Paste. Ctrl+F searches. Ctrl+P pins. Ctrl+Space previews.");
 
             _pnlMain.Controls.Add(_pnlContent);
+            _pnlMain.Controls.Add(_pnlTypeFilters);
             _pnlMain.Controls.Add(_pnlSearchFilter);
             _pnlMain.Controls.Add(_pnlHeader);
             _pnlMain.Controls.SetChildIndex(_pnlContent, 0);
             _pnlMain.Controls.SetChildIndex(_pnlDetailToolbar, 1);
-            _pnlMain.Controls.SetChildIndex(_pnlSearchFilter, 2);
-            _pnlMain.Controls.SetChildIndex(_pnlHeader, 3);
+            _pnlMain.Controls.SetChildIndex(_pnlTypeFilters, 2);
+            _pnlMain.Controls.SetChildIndex(_pnlSearchFilter, 3);
+            _pnlMain.Controls.SetChildIndex(_pnlHeader, 4);
             if (_isDemoMode || _isPreviewMode)
             {
-                _pnlDemoBanner = new Panel { Dock = DockStyle.Top, Height = 26, BackColor = Brand.WarningBannerBg };
+                _pnlDemoBanner = new Panel { Dock = DockStyle.Top, Height = 16, BackColor = Brand.WarningBannerBg };
                 _pnlDemoBanner.Controls.Add(new Label { Dock = DockStyle.Fill,
                     Text = "Preview mode — recording disabled", Font = _fontRegular80,
                     ForeColor = Brand.WarningBannerFg, TextAlign = ContentAlignment.MiddleCenter });
                 _pnlMain.Controls.Add(_pnlDemoBanner);
+                // Keep the title bar at the top, including in private preview mode.
+                _pnlMain.Controls.SetChildIndex(_pnlDemoBanner, 2);
             }
             Controls.Add(_pnlMain);
             Controls.Add(_pnlStatusBar);
@@ -478,34 +556,68 @@ namespace DollyPaste
             UpdatePauseResumeState();
             ResumeLayout(true);
             UpdateHeaderLayout();
+            UpdateSearchFilterLayout();
+            UpdateFooterLayout();
         }
-
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wParam, string lParam);
 
         private Button CreateActionButton(string text, int width, EventHandler action)
         {
-            Button button = new Button { Text = text, Width = width, Height = 28,
+            Button button = new BrandButton { Text = text, Width = width, Height = 28,
                 Font = _fontRegular85, FlatStyle = FlatStyle.Flat, BackColor = Brand.WarmWoolCanvas,
                 ForeColor = Brand.TextPrimary, AccessibleName = text };
-            button.FlatAppearance.BorderColor = Brand.Border;
+            Brand.StyleButton(button, false);
             button.Click += action;
             return button;
         }
 
         private void UpdateHeaderLayout()
         {
-            if (_btnSettings == null || _btnPauseResume == null) return;
-            _btnSettings.Location = new Point(_pnlHeader.ClientSize.Width - 84, 10);
-            _btnPauseResume.Location = new Point(_btnSettings.Left - 68, 10);
+            if (_btnClose == null) return;
+            _btnClose.SetBounds(_pnlHeader.ClientSize.Width - 40, 4, 32, 32);
         }
 
         private void UpdateSearchFilterLayout()
         {
             if (_btnNavAll == null || _btnNavPinned == null) return;
-            _btnNavPinned.SetBounds(_pnlSearchFilter.ClientSize.Width - 84, 3, 72, 28);
-            _btnNavAll.SetBounds(_btnNavPinned.Left - 68, 3, 64, 28);
-            _txtSearch.Width = Math.Max(1, _btnNavAll.Left - _txtSearch.Left - 8);
+            _btnNavPinned.SetBounds(_pnlSearchFilter.ClientSize.Width - 69, 4, 60, 30);
+            _btnNavAll.SetBounds(_btnNavPinned.Left - 44, 4, 42, 30);
+            _pnlSearchBox.SetBounds(9, 1, Math.Max(1, _btnNavAll.Left - 19), 36);
+            _txtSearch.SetBounds(34, 9, Math.Max(1, _pnlSearchBox.Width - 45), 20);
+            _pnlSearchBox.Invalidate();
+        }
+
+        private void UpdateFooterLayout()
+        {
+            if (_btnSettings == null || _lblToast == null) return;
+            _btnSettings.SetBounds(_pnlStatusBar.ClientSize.Width - 39, 0, 30, 28);
+            _btnPauseResume.SetBounds(_btnSettings.Left - 84, 0, 80, 28);
+            _lblStatusRight.SetBounds(9, 0, 56, 28);
+            _lblStatusLeft.SetBounds(72, 0, Math.Max(1, _btnPauseResume.Left - 78), 28);
+            _lblToast.SetBounds(9, 0, Math.Max(1, _btnPauseResume.Left - 15), 28);
+        }
+
+        private static void ConfigureIconButton(Button button, string icon, bool hideText)
+        {
+            BrandButton brand = button as BrandButton;
+            if (brand != null) { brand.IconName = icon; brand.HideText = hideText; }
+            button.FlatAppearance.BorderSize = 0;
+            button.ForeColor = Brand.TextSecondary;
+            button.BackColor = Brand.Surface;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll", EntryPoint = "SendMessage")]
+        private static extern IntPtr SendWindowMessage(IntPtr handle, int message, IntPtr wParam, IntPtr lParam);
+
+        private void OnTitleBarMouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            ReleaseCapture();
+            SendWindowMessage(Handle, 0x00A1, new IntPtr(2), IntPtr.Zero);
         }
 
         private void TogglePreview()
@@ -513,6 +625,8 @@ namespace DollyPaste
             _previewExpanded = !_previewExpanded;
             _pnlDetail.Visible = _previewExpanded;
             _btnPreview.Text = _previewExpanded ? "Hide" : "Preview";
+            _btnPreview.BackColor = _previewExpanded ? Brand.AccentSoft : Brand.Surface;
+            _btnPreview.ForeColor = _previewExpanded ? Brand.HeaderBlue : Brand.TextSecondary;
             _btnPreview.AccessibleDescription = _previewExpanded ? "Preview expanded" : "Preview collapsed";
             UpdatePreviewHeight();
         }
@@ -520,7 +634,7 @@ namespace DollyPaste
         private void UpdatePreviewHeight()
         {
             bool hasImage = _picImagePreview != null && _picImagePreview.Image != null;
-            int minimumListHeight = hasImage ? 54 : 100;
+            int minimumListHeight = 100;
             if (_pnlDetailMeta != null) _pnlDetailMeta.Height = hasImage ? 24 : 28;
             if (_pnlTextContainer != null)
                 _pnlTextContainer.Padding = hasImage ? new Padding(14, 0, 14, 4) : new Padding(14, 3, 14, 6);
@@ -551,7 +665,7 @@ namespace DollyPaste
             {
                 using (Pen p = new Pen(Brand.Border, 1))
                 {
-                    e.Graphics.DrawLine(p, 0, 0, 0, _pnlDetail.Height);
+                    e.Graphics.DrawLine(p, 0, 0, _pnlDetail.Width, 0);
                 }
             };
 
@@ -584,11 +698,11 @@ namespace DollyPaste
             {
                 using (Pen p = new Pen(Brand.BorderLight, 1))
                 {
-                    e.Graphics.DrawLine(p, 12, _pnlDetailToolbar.Height - 1, _pnlDetailToolbar.Width - 12, _pnlDetailToolbar.Height - 1);
+                    e.Graphics.DrawLine(p, 0, 0, _pnlDetailToolbar.Width, 0);
                 }
             };
 
-            _btnCopy = new Button();
+            _btnCopy = new BrandButton();
             _btnCopy.Text = "Copy Text";
             _btnCopy.Font = _fontBold85;
             _btnCopy.BackColor = Brand.MossGreen;
@@ -599,9 +713,10 @@ namespace DollyPaste
             _btnCopy.Location = new Point(14, 11);
             _btnCopy.AccessibleName = "Copy selected clip to clipboard";
             _btnCopy.Click += delegate { CopySelectedClip(); };
+            Brand.StyleButton(_btnCopy, true);
             _pnlDetailToolbar.Controls.Add(_btnCopy);
 
-            _btnPin = new Button();
+            _btnPin = new BrandButton();
             _btnPin.Text = "☆ Pin";
             _btnPin.Font = _fontRegular85;
             _btnPin.BackColor = Brand.WarmWoolCanvas;
@@ -612,9 +727,10 @@ namespace DollyPaste
             _btnPin.Location = new Point(110, 11);
             _btnPin.AccessibleName = "Toggle pin state for selected clip";
             _btnPin.Click += delegate { TogglePinSelectedClip(); };
+            Brand.StyleButton(_btnPin, false);
             _pnlDetailToolbar.Controls.Add(_btnPin);
 
-            _btnDelete = new Button();
+            _btnDelete = new BrandButton();
             _btnDelete.Text = "Delete";
             _btnDelete.Font = _fontRegular85;
             _btnDelete.BackColor = Brand.WarmWoolCanvas;
@@ -625,6 +741,7 @@ namespace DollyPaste
             _btnDelete.Location = new Point(198, 11);
             _btnDelete.AccessibleName = "Delete selected clip";
             _btnDelete.Click += delegate { DeleteSelectedClip(); };
+            Brand.StyleButton(_btnDelete, false);
             _pnlDetailToolbar.Controls.Add(_btnDelete);
 
             _pnlDetailMeta = new Panel();
@@ -679,23 +796,60 @@ namespace DollyPaste
             _txtPreview.AccessibleName = "Clip content preview";
             _pnlTextContainer.Controls.Add(_txtPreview);
 
-            _pnlImagePreview = new Panel { Dock = DockStyle.Left, Width = 132,
+            _pnlImagePreview = new Panel { Dock = DockStyle.Left, Width = 64,
                 Padding = new Padding(0, 0, 10, 0), Visible = false };
             _picImagePreview = new PictureBox { Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.Zoom, BackColor = Brand.WarmWoolCanvas,
                 AccessibleName = "Copied image preview", TabStop = false };
             _pnlImagePreview.Controls.Add(_picImagePreview);
             _pnlTextContainer.Controls.Add(_pnlImagePreview);
+
+            _pnlOcrPreview = new Panel { Dock = DockStyle.Right, Width = 120,
+                Padding = new Padding(8, 0, 0, 0), Visible = false };
+            _txtOcrPreview = new PrivacyTextBox(true, delegate { CopySelectedClip(); });
+            _txtOcrPreview.Dock = DockStyle.Fill;
+            _txtOcrPreview.Multiline = true;
+            _txtOcrPreview.ReadOnly = true;
+            _txtOcrPreview.WordWrap = true;
+            _txtOcrPreview.ScrollBars = ScrollBars.Vertical;
+            _txtOcrPreview.BackColor = Brand.WarmWoolCanvas;
+            _txtOcrPreview.ForeColor = Brand.TextPrimary;
+            _txtOcrPreview.BorderStyle = BorderStyle.None;
+            _txtOcrPreview.Font = _fontPreviewRegular;
+            _txtOcrPreview.AccessibleName = "Extracted image text";
+            _pnlOcrPreview.Controls.Add(_txtOcrPreview);
+            _pnlTextContainer.Controls.Add(_pnlOcrPreview);
             _pnlTextContainer.Controls.SetChildIndex(_txtPreview, 0);
-            _pnlTextContainer.Controls.SetChildIndex(_pnlImagePreview, 1);
+            _pnlTextContainer.Controls.SetChildIndex(_pnlOcrPreview, 1);
+            _pnlTextContainer.Controls.SetChildIndex(_pnlImagePreview, 2);
+            _pnlTextContainer.Resize += delegate { UpdateImageValueLayout(); };
+
+            // Image controls replace the metadata row, preserving room for the preview
+            // and one full history item even at the minimum popup size.
+            _pnlImageActions = new Panel { Dock = DockStyle.Top, Height = 28, Visible = false,
+                BackColor = Color.White, AccessibleName = "Image preview and text actions" };
+            _btnCopyImageBase64 = CreateActionButton("Copy Base64", 94, delegate
+            {
+                if (SelectImageCopyTarget(ImageCopyTarget.Base64)) CopySelectedClip();
+            });
+            _btnCopyImageBase64.AccessibleName = "Copy image PNG base64 to clipboard";
+            _btnCopyImageText = CreateActionButton("Copy text", 86, delegate { CopySelectedImageText(); });
+            _btnCopyImageText.AccessibleName = "Copy extracted image text to clipboard";
+            _btnCopyImageText.Enabled = false;
+            _pnlImageActions.Controls.AddRange(new Control[] { _btnCopyImageBase64, _btnCopyImageText });
+            _toolTip.SetToolTip(_btnCopyImageBase64, "Copy the full PNG base64 value and close (Enter or Ctrl+C)");
+            _toolTip.SetToolTip(_btnCopyImageText, "Copy extracted text and close");
+            UpdateImageValueLayout();
 
             // Detail Content Order: Fill (_pnlTextContainer at 0), Top (_pnlDetailMeta at 1), Top (_pnlDetailToolbar at 2)
             _pnlDetailContent.Controls.Add(_pnlTextContainer);
             _pnlDetailContent.Controls.Add(_pnlDetailMeta);
+            _pnlDetailContent.Controls.Add(_pnlImageActions);
             _pnlDetailContent.Controls.Add(_pnlDetailToolbar);
             _pnlDetailContent.Controls.SetChildIndex(_pnlTextContainer, 0);
             _pnlDetailContent.Controls.SetChildIndex(_pnlDetailMeta, 1);
-            _pnlDetailContent.Controls.SetChildIndex(_pnlDetailToolbar, 2);
+            _pnlDetailContent.Controls.SetChildIndex(_pnlImageActions, 2);
+            _pnlDetailContent.Controls.SetChildIndex(_pnlDetailToolbar, 3);
 
             _pnlDetail.Controls.Add(_pnlDetailContent);
         }
@@ -719,16 +873,28 @@ namespace DollyPaste
             _lblDetailTime.Size = new Size(timeWidth, 20);
         }
 
+        private void UpdateImageValueLayout()
+        {
+            if (_pnlOcrPreview == null || _btnCopyImageBase64 == null || _btnCopyImageText == null) return;
+            int valueLeft = _pnlTextContainer.Padding.Left + _pnlImagePreview.Width;
+            int availableWidth = Math.Max(2, _pnlTextContainer.ClientSize.Width - valueLeft - _pnlTextContainer.Padding.Right);
+            int ocrWidth = availableWidth / 2;
+            int base64Width = availableWidth - ocrWidth;
+            _pnlOcrPreview.Width = ocrWidth;
+            _btnCopyImageBase64.SetBounds(valueLeft, 1, Math.Max(1, Math.Min(94, base64Width - 4)), 25);
+            _btnCopyImageText.SetBounds(valueLeft + base64Width + 8, 1, Math.Max(1, Math.Min(86, ocrWidth - 8)), 25);
+        }
+
         private Button CreateFilterPill(string text, string kind, int width, ref int currentX)
         {
-            Button btn = new Button();
+            Button btn = new BrandButton();
             btn.Text = text;
             btn.Tag = kind;
             btn.Font = _fontRegular85;
             btn.FlatStyle = FlatStyle.Flat;
             btn.FlatAppearance.BorderSize = 0;
             btn.Size = new Size(width, 26);
-            btn.Location = new Point(currentX, 45);
+            btn.Location = new Point(currentX, 7);
             btn.AccessibleName = string.Format("Filter by {0}", text);
             btn.Click += delegate
             {
@@ -736,7 +902,7 @@ namespace DollyPaste
                 UpdateFilterPillStyles();
                 ApplyFilters();
             };
-            _pnlSearchFilter.Controls.Add(btn);
+            _pnlTypeFilters.Controls.Add(btn);
             currentX += width + 4;
             return btn;
         }
@@ -806,6 +972,7 @@ namespace DollyPaste
                 {
                     _lblStatusLeft.Visible = true;
                 }
+                if (_lblStatusRight != null) _lblStatusRight.Visible = true;
             };
         }
 
@@ -847,7 +1014,7 @@ namespace DollyPaste
                 _isRefreshing = true;
                 _history.Prune();
                 _allClips = _history.Snapshot();
-                ClearImageThumbnails();
+                RemoveStaleImageThumbnails();
 
                 ApplyFilters();
                 UpdateNavStyles();
@@ -894,7 +1061,9 @@ namespace DollyPaste
                     else
                     {
                         string text = entry.Text ?? "";
-                        if (text.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0)
+                        string imageText = entry.OcrText ?? "";
+                        if (text.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0 &&
+                            imageText.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0)
                         {
                             continue;
                         }
@@ -906,7 +1075,10 @@ namespace DollyPaste
 
             _displayedClips = filtered;
 
+            _changingListItems = true;
             _listBoxClips.BeginUpdate();
+            try
+            {
             _listBoxClips.Items.Clear();
             for (int i = 0; i < _displayedClips.Count; i++)
             {
@@ -939,7 +1111,12 @@ namespace DollyPaste
                 _listBoxClips.SelectedIndex = -1;
             }
 
-            _listBoxClips.EndUpdate();
+            }
+            finally
+            {
+                _listBoxClips.EndUpdate();
+                _changingListItems = false;
+            }
 
             if (_displayedClips.Count == 0)
             {
@@ -949,7 +1126,7 @@ namespace DollyPaste
                 if (_clipboard != null && _clipboard.Paused)
                 {
                     _lblEmptyTitle.Text = "Capture is paused";
-                    _lblEmptySubtitle.Text = "Clipboard recording is currently paused.\nClick 'Resume' above to resume capturing clips.";
+                    _lblEmptySubtitle.Text = "Clipboard recording is currently paused.\nClick Resume below to start capturing clips.";
                 }
                 else if (!string.IsNullOrEmpty(query))
                 {
@@ -992,12 +1169,18 @@ namespace DollyPaste
                 _btnCopy.Enabled = false;
                 _btnPin.Enabled = false;
                 _btnDelete.Enabled = false;
+                _btnPreview.Enabled = false;
+                _lblFormatHint.Visible = false;
+                UpdateStatusBar();
                 return;
             }
 
             ClipEntry clip = _displayedClips[_listBoxClips.SelectedIndex];
             Guid expectedId = clip.Id;
+            if (_selectedClipId != expectedId) _imageCopyTarget = ImageCopyTarget.Image;
             _selectedClipId = expectedId;
+            if (_imageCopyTarget == ImageCopyTarget.OcrText && !HasOcrText(clip))
+                _imageCopyTarget = ImageCopyTarget.Image;
 
             if (_history != null)
             {
@@ -1018,8 +1201,12 @@ namespace DollyPaste
             _pnlDetailContent.Visible = true;
 
             _btnPin.Text = clip.IsPinned ? "★ Pinned" : "☆ Pin";
+            _btnPin.ForeColor = clip.IsPinned ? Brand.HeaderBlue : Brand.TextSecondary;
+            _btnPin.BackColor = clip.IsPinned ? Brand.AccentSoft : Brand.Surface;
+            _btnPin.AccessibleName = clip.IsPinned ? "Unpin selected clip" : "Pin selected clip";
             _btnPin.Enabled = true;
             _btnDelete.Enabled = true;
+            _btnPreview.Enabled = true;
 
             DateTime localTime = clip.CapturedUtc.ToLocalTime();
             _lblDetailTime.Text = localTime.ToString("MMM d, yyyy h:mm tt");
@@ -1065,10 +1252,11 @@ namespace DollyPaste
                 if (fullText != null)
                 {
                     UpdateImagePreview(clip, fullText);
+                    bool isImage = string.Equals(kind, "IMAGE", StringComparison.OrdinalIgnoreCase);
                     // Native multiline edit controls expect CRLF; keep stored/copied text unchanged.
                     _txtPreview.Text = fullText.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
                     if (string.Equals(kind, "CODE", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(kind, "IMAGE", StringComparison.OrdinalIgnoreCase))
+                        isImage)
                     {
                         _txtPreview.Font = _fontPreviewCode;
                     }
@@ -1093,6 +1281,7 @@ namespace DollyPaste
                 }
                 UpdateDetailMetaLayout();
             }
+            UpdateCopyTargetAppearance();
         }
 
         private void UpdateImagePreview(ClipEntry clip, string base64)
@@ -1109,10 +1298,20 @@ namespace DollyPaste
                 _previewImageId = clip.Id;
             }
             _pnlImagePreview.Visible = _picImagePreview.Image != null;
+            // Native edit controls take seconds to wrap a large, unbroken base64
+            // value in a narrow column. Keep it intact and scroll horizontally.
+            _txtPreview.WordWrap = false;
+            _txtPreview.ScrollBars = ScrollBars.Both;
+            _pnlDetailMeta.Visible = false;
+            _pnlImageActions.Visible = true;
+            _pnlOcrPreview.Visible = true;
+            _txtOcrPreview.Text = GetImageTextPreview(clip).Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
+            _txtOcrPreview.ForeColor = string.IsNullOrWhiteSpace(clip.OcrText) ? Brand.TextSecondary : Brand.TextPrimary;
+            _btnCopyImageBase64.Enabled = true;
+            _btnCopyImageText.Enabled = clip.OcrStatus == OcrStates.Complete && !string.IsNullOrWhiteSpace(clip.OcrText);
             _txtPreview.AccessibleName = "Image PNG base64 value";
-            _btnCopy.AccessibleName = "Copy image base64 to clipboard";
-            _toolTip.SetToolTip(_btnCopy, "Copy full PNG base64 and close (Enter or Ctrl+C)");
             UpdatePreviewHeight();
+            UpdateImageValueLayout();
         }
 
         private void ClearImagePreview()
@@ -1122,10 +1321,34 @@ namespace DollyPaste
             if (previous != null) previous.Dispose();
             _previewImageId = null;
             _pnlImagePreview.Visible = false;
+            // Clear the previous image value before restoring normal text wrapping.
+            if (!_txtPreview.WordWrap) _txtPreview.Clear();
+            _txtPreview.WordWrap = true;
+            _txtPreview.ScrollBars = ScrollBars.Vertical;
+            _pnlImageActions.Visible = false;
+            _pnlOcrPreview.Visible = false;
+            _txtOcrPreview.Text = "";
+            _pnlDetailMeta.Visible = true;
+            _btnCopyImageBase64.Enabled = false;
+            _btnCopyImageText.Enabled = false;
             _txtPreview.AccessibleName = "Clip content preview";
+            _btnCopy.Text = "Copy text";
             _btnCopy.AccessibleName = "Copy selected clip to clipboard";
             _toolTip.SetToolTip(_btnCopy, "Copy selected clip and close (Enter or Ctrl+C)");
             UpdatePreviewHeight();
+        }
+
+        private static string GetImageTextPreview(ClipEntry clip)
+        {
+            if (clip.OcrStatus == OcrStates.Complete && !string.IsNullOrWhiteSpace(clip.OcrText))
+                return clip.OcrText;
+            if (clip.OcrStatus == OcrStates.NoText)
+                return "No text found in this image.";
+            if (clip.OcrStatus == OcrStates.Unavailable)
+                return "Text recognition is unavailable.\r\n\r\nCheck the OCR language capability in Windows language settings. Availability in the portable app depends on Windows; image and Base64 copying remain available.";
+            if (clip.OcrStatus == OcrStates.Failed)
+                return "Text recognition could not finish.\r\n\r\nRestart Dolly Paste to retry.";
+            return "Reading text from this image...";
         }
 
         private Bitmap GetImageThumbnail(ClipEntry clip)
@@ -1149,7 +1372,85 @@ namespace DollyPaste
             _imageThumbnails.Clear();
         }
 
+        private void RemoveStaleImageThumbnails()
+        {
+            HashSet<Guid> retained = new HashSet<Guid>();
+            foreach (ClipEntry entry in _allClips)
+                if (entry.Kind == "IMAGE" && !entry.IsSensitive) retained.Add(entry.Id);
+            foreach (Guid id in new List<Guid>(_imageThumbnails.Keys))
+                if (!retained.Contains(id))
+                {
+                    if (_imageThumbnails[id] != null) _imageThumbnails[id].Dispose();
+                    _imageThumbnails.Remove(id);
+                }
+        }
+
+        private static bool HasOcrText(ClipEntry entry)
+        {
+            return entry != null && !entry.IsSensitive && entry.Kind == "IMAGE" &&
+                entry.OcrStatus == OcrStates.Complete && !string.IsNullOrWhiteSpace(entry.OcrText);
+        }
+
+        private ClipEntry SelectedEntry
+        {
+            get
+            {
+                int index = _listBoxClips.SelectedIndex;
+                return index >= 0 && index < _displayedClips.Count ? _displayedClips[index] : null;
+            }
+        }
+
+        internal ImageCopyTarget SelectedImageCopyTarget { get { return _imageCopyTarget; } }
+
+        internal bool SelectImageCopyTarget(ImageCopyTarget target)
+        {
+            ClipEntry entry = SelectedEntry;
+            if (entry == null || entry.IsSensitive || entry.Kind != "IMAGE" ||
+                (target == ImageCopyTarget.OcrText && !HasOcrText(entry))) return false;
+            if (target != ImageCopyTarget.Image && target != ImageCopyTarget.OcrText && target != ImageCopyTarget.Base64)
+                return false;
+            _imageCopyTarget = target;
+            UpdateCopyTargetAppearance();
+            _listBoxClips.Invalidate();
+            return true;
+        }
+
+        private void UpdateCopyTargetAppearance()
+        {
+            ClipEntry entry = SelectedEntry;
+            bool image = entry != null && !entry.IsSensitive && entry.Kind == "IMAGE";
+            string action = image ? (_imageCopyTarget == ImageCopyTarget.Image ? "Copy image" :
+                _imageCopyTarget == ImageCopyTarget.OcrText ? "Copy text" : "Copy Base64") : "Copy text";
+            _btnCopy.Text = action;
+            _btnCopy.AccessibleName = action + " to clipboard";
+            _listBoxClips.AccessibleDescription = image ? action + " selected. Left and Right change the format." : "Enter copies the selected text clip.";
+            _lblFormatHint.Visible = image;
+            _toolTip.SetToolTip(_btnCopy, action + " and close (Enter or Ctrl+C)");
+            UpdateStatusBar();
+        }
+
+        private bool MoveImageCopyTarget(int direction)
+        {
+            ClipEntry entry = SelectedEntry;
+            if (entry == null || entry.IsSensitive || entry.Kind != "IMAGE") return false;
+            ImageCopyTarget[] targets = HasOcrText(entry) ?
+                new[] { ImageCopyTarget.Image, ImageCopyTarget.OcrText, ImageCopyTarget.Base64 } :
+                new[] { ImageCopyTarget.Image, ImageCopyTarget.Base64 };
+            int index = Array.IndexOf(targets, _imageCopyTarget);
+            return SelectImageCopyTarget(targets[Math.Max(0, Math.Min(targets.Length - 1, index + direction))]);
+        }
+
         private void CopySelectedClip()
+        {
+            CopySelectedPayload();
+        }
+
+        private void CopySelectedImageText()
+        {
+            if (SelectImageCopyTarget(ImageCopyTarget.OcrText)) CopySelectedPayload();
+        }
+
+        private void CopySelectedPayload()
         {
             if (!_selectedClipId.HasValue) return;
 
@@ -1174,7 +1475,10 @@ namespace DollyPaste
                 return;
             }
 
-            string text = _history.GetText(id);
+            bool isImage = entry.Kind == "IMAGE";
+            ImageCopyTarget target = _imageCopyTarget;
+            bool imageText = isImage && target == ImageCopyTarget.OcrText;
+            string text = imageText ? _history.GetOcrText(id) : _history.GetText(id);
             if (string.IsNullOrEmpty(text))
             {
                 return;
@@ -1182,16 +1486,20 @@ namespace DollyPaste
 
             if (_isDemoMode || _isPreviewMode)
             {
-                ShowToast("Preview mode: copy simulated");
+                ShowToast(!isImage ? "Preview mode: copy simulated" : imageText ? "Preview mode: text copy simulated" :
+                    target == ImageCopyTarget.Image ? "Preview mode: image copy simulated" : "Preview mode: Base64 copy simulated");
                 return;
             }
 
             if (_clipboard != null)
             {
-                bool success = _clipboard.CopyText(text, delegate(uint sequence)
+                Action<uint> trackCopy = delegate(uint sequence)
                 {
-                    _history.TrackRestored(id, sequence);
-                });
+                    if (imageText) _history.TrackRestoredOcr(id, sequence);
+                    else _history.TrackRestored(id, sequence);
+                };
+                bool success = isImage && target == ImageCopyTarget.Image ?
+                    _clipboard.CopyImage(text, trackCopy) : _clipboard.CopyText(text, trackCopy);
 
                 if (success)
                 {
@@ -1230,6 +1538,7 @@ namespace DollyPaste
             {
                 _lblStatusLeft.Visible = false;
             }
+            _lblStatusRight.Visible = false;
             _toastTimer.Stop();
             _toastTimer.Start();
         }
@@ -1267,7 +1576,10 @@ namespace DollyPaste
                 _btnPauseResume.Enabled = false;
                 _btnPauseResume.Text = "Paused";
             }
-
+            ((BrandButton)_btnPauseResume).IconName = isPaused ? "play" : "pause";
+            _btnPauseResume.BackColor = isPaused ? Brand.AccentSoft : Brand.Surface;
+            _btnPauseResume.ForeColor = isPaused ? Brand.HeaderBlue : Brand.TextSecondary;
+            _btnPauseResume.AccessibleDescription = isPaused ? "Clipboard recording paused" : "Clipboard recording active";
         }
 
         private void UpdateStatusBar()
@@ -1277,7 +1589,7 @@ namespace DollyPaste
             string statusLeft;
             if (_isDemoMode || _isPreviewMode)
             {
-                statusLeft = "↑↓ choose · Enter copy · Esc close";
+                statusLeft = "↑ ↓ select · Enter copy";
             }
             else if (_clipboard != null && !string.IsNullOrEmpty(_clipboard.Status) && _clipboard.Status != "Active")
             {
@@ -1285,7 +1597,7 @@ namespace DollyPaste
             }
             else
             {
-                statusLeft = "↑↓ choose · Enter copy · Esc close";
+                statusLeft = "↑ ↓ select · Enter copy";
             }
 
             if (_history != null && !string.IsNullOrEmpty(_history.StorageWarning))
@@ -1296,8 +1608,10 @@ namespace DollyPaste
             _lblStatusLeft.Text = statusLeft;
             _toolTip.SetToolTip(_lblStatusLeft, statusLeft);
 
-            int total = _allClips != null ? _allClips.Count : 0;
-            _lblStatusRight.Text = string.Format("{0} clips", total);
+            int total = _displayedClips != null ? _displayedClips.Count : 0;
+            string count = string.Format("{0} {1}", total, total == 1 ? "clip" : "clips");
+            _lblStatusRight.Text = count;
+            _lblClipCount.Text = count;
         }
 
         private void UpdateNavStyles()
@@ -1305,8 +1619,19 @@ namespace DollyPaste
             if (_btnNavAll == null || _btnNavPinned == null) return;
             _btnNavAll.Text = "All";
             _btnNavPinned.Text = "Pinned";
-            ApplyFilterPillStyle(_btnNavAll, _currentNav == NavMode.All);
-            ApplyFilterPillStyle(_btnNavPinned, _currentNav == NavMode.Pinned);
+            ApplyCollectionStyle(_btnNavAll, _currentNav == NavMode.All);
+            ApplyCollectionStyle(_btnNavPinned, _currentNav == NavMode.Pinned);
+        }
+
+        private void ApplyCollectionStyle(Button button, bool active)
+        {
+            button.FlatAppearance.BorderSize = 0;
+            button.BackColor = active ? Brand.Surface : Brand.HeaderHover;
+            button.ForeColor = active ? Brand.HeaderBlue : Color.White;
+            button.FlatAppearance.MouseOverBackColor = active ? Brand.AccentSoft : Brand.HeaderHover;
+            button.FlatAppearance.MouseDownBackColor = Brand.AccentSoft;
+            button.AccessibleDescription = active ? "Selected collection" : "Show collection";
+            button.Invalidate();
         }
 
         private void UpdateFilterPillStyles()
@@ -1320,16 +1645,15 @@ namespace DollyPaste
 
         private void ApplyFilterPillStyle(Button btn, bool active)
         {
-            if (active)
-            {
-                btn.BackColor = Brand.MossGreen;
-                btn.ForeColor = Color.White;
-            }
-            else
-            {
-                btn.BackColor = Color.FromArgb(240, 237, 230);
-                btn.ForeColor = Brand.TextSecondary;
-            }
+            if (btn == null) return;
+            btn.FlatAppearance.BorderSize = 0;
+            btn.BackColor = active ? Brand.AccentSoft : Brand.Surface;
+            btn.ForeColor = active ? Brand.HeaderBlue : Brand.TextSecondary;
+            btn.Font = active ? _fontBold85 : _fontRegular85;
+            btn.FlatAppearance.MouseOverBackColor = Brand.CardHover;
+            btn.FlatAppearance.MouseDownBackColor = Brand.AccentSoft;
+            btn.AccessibleDescription = active ? "Selected content type" : "Filter content type";
+            btn.Invalidate();
         }
 
         private void OpenSettings()
@@ -1374,9 +1698,10 @@ namespace DollyPaste
             _toastTimer.Stop();
             _lblToast.Visible = false;
             _lblStatusLeft.Visible = true;
+            _lblStatusRight.Visible = true;
             Rectangle workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
             Size initialSize, minSize;
-            ClampWindowSize(workArea, this.Size, new Size(380, 420), out initialSize, out minSize);
+            ClampWindowSize(workArea, this.Size, new Size(420, 460), out initialSize, out minSize);
             this.MinimumSize = minSize;
             this.Bounds = GetPopupBounds(workArea, Cursor.Position, initialSize);
             this.WindowState = FormWindowState.Normal;
@@ -1422,6 +1747,14 @@ namespace DollyPaste
             if (keyData == Keys.Escape) { Hide(); return true; }
             if (keyData == (Keys.Control | Keys.Space)) { TogglePreview(); return true; }
             bool pickerFocused = _txtSearch.Focused || _listBoxClips.Focused;
+            bool atSearchEdge = _txtSearch.SelectionLength == 0 &&
+                ((keyData == Keys.Right && _txtSearch.SelectionStart == _txtSearch.TextLength) ||
+                (keyData == Keys.Left && _txtSearch.SelectionStart == 0));
+            if (pickerFocused && (keyData == Keys.Left || keyData == Keys.Right) &&
+                (_listBoxClips.Focused || atSearchEdge) && MoveImageCopyTarget(keyData == Keys.Right ? 1 : -1))
+                return true;
+            // Native single-column list boxes otherwise treat Left/Right as item navigation.
+            if (_listBoxClips.Focused && (keyData == Keys.Left || keyData == Keys.Right)) return true;
             if (pickerFocused && keyData == (Keys.Control | Keys.P))
             {
                 TogglePinSelectedClip();
@@ -1463,113 +1796,149 @@ namespace DollyPaste
             }
         }
 
+        internal Rectangle GetClipCardBounds(int index)
+        {
+            if (index < 0 || index >= _displayedClips.Count) return Rectangle.Empty;
+            Rectangle row = _listBoxClips.GetItemRectangle(index);
+            return new Rectangle(row.Left + 5, row.Top + 3, Math.Max(1, row.Width - 10), Math.Max(1, row.Height - 6));
+        }
+
+        internal Rectangle GetImageTargetBounds(int index, ImageCopyTarget target)
+        {
+            if (index < 0 || index >= _displayedClips.Count) return Rectangle.Empty;
+            ClipEntry entry = _displayedClips[index];
+            if (entry.IsSensitive || entry.Kind != "IMAGE" ||
+                (target == ImageCopyTarget.OcrText && !HasOcrText(entry))) return Rectangle.Empty;
+            Rectangle card = GetClipCardBounds(index);
+            int left = card.Left + 63;
+            if (target == ImageCopyTarget.Image) return new Rectangle(left, card.Top + 54, 65, 24);
+            if (target == ImageCopyTarget.OcrText) return new Rectangle(left + 70, card.Top + 54, 57, 24);
+            if (target == ImageCopyTarget.Base64) return new Rectangle(left + (HasOcrText(entry) ? 132 : 70), card.Top + 54, 76, 24);
+            return Rectangle.Empty;
+        }
+
+        private void OnListBoxMeasureItem(object sender, MeasureItemEventArgs e)
+        {
+            ClipEntry entry = e.Index >= 0 && e.Index < _displayedClips.Count ? _displayedClips[e.Index] : null;
+            e.ItemHeight = entry != null && !entry.IsSensitive && entry.Kind == "IMAGE" ? 90 : 42;
+        }
+        private void OnClipsMouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            int index = _listBoxClips.IndexFromPoint(e.Location);
+            if (index < 0 || index >= _displayedClips.Count) return;
+            _listBoxClips.SelectedIndex = index;
+            foreach (ImageCopyTarget target in new[] { ImageCopyTarget.Image, ImageCopyTarget.OcrText, ImageCopyTarget.Base64 })
+                if (GetImageTargetBounds(index, target).Contains(e.Location))
+                {
+                    SelectImageCopyTarget(target);
+                    break;
+                }
+            _listBoxClips.Focus();
+        }
+
+        private static void DrawRoundedCard(Graphics graphics, Rectangle bounds, Color fill, Color border, bool selected)
+        {
+            if (bounds.Width < 2 || bounds.Height < 2) return;
+            RectangleF box = new RectangleF(bounds.X + 0.5f, bounds.Y + 0.5f, bounds.Width - 1, bounds.Height - 1);
+            using (GraphicsPath path = Brand.CreateRoundedPath(box, 8))
+            {
+                SmoothingMode previous = graphics.SmoothingMode;
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (Brush brush = new SolidBrush(fill)) graphics.FillPath(brush, path);
+                using (Pen pen = new Pen(border, selected ? 1.6f : 1f)) graphics.DrawPath(pen, path);
+                graphics.SmoothingMode = previous;
+            }
+        }
+
         private void OnListBoxDrawItem(object sender, DrawItemEventArgs e)
         {
             if (e.Index < 0 || e.Index >= _displayedClips.Count) return;
+            ClipEntry entry = _displayedClips[e.Index];
+            bool selected = (e.State & DrawItemState.Selected) != 0;
+            Graphics graphics = e.Graphics;
+            using (Brush canvas = new SolidBrush(Brand.Canvas)) graphics.FillRectangle(canvas, e.Bounds);
+            Rectangle card = GetClipCardBounds(e.Index);
+            DrawRoundedCard(graphics, card, Brand.Surface, selected ? Color.FromArgb(154, 193, 235) : Brand.BorderLight, selected);
+            bool image = !entry.IsSensitive && entry.Kind == "IMAGE";
+            int textLeft = card.Left + (image ? 63 : 49);
+            int ageWidth = 61;
+            Rectangle ageBounds = new Rectangle(card.Right - ageWidth - 9, card.Top + 8, ageWidth, 16);
+            TextRenderer.DrawText(graphics, FormatRelativeTime(entry.CapturedUtc), _fontRegular80,
+                ageBounds, Brand.TextMuted, TextFormatFlags.Right | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+            if (entry.IsPinned)
+                Brand.DrawIcon(graphics, "pin", new Rectangle(ageBounds.Left - 18, card.Top + 10, 12, 12), Brand.HeaderBlue);
+            int titleWidth = Math.Max(1, ageBounds.Left - textLeft - (entry.IsPinned ? 22 : 6));
 
-            ClipEntry item = _displayedClips[e.Index];
-            bool isSelected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-            Graphics g = e.Graphics;
-            Rectangle bounds = e.Bounds;
-
-            Color bgColor = isSelected ? Brand.CardSelected : (e.Index % 2 == 0 ? Color.White : Brand.WarmWoolCanvas);
-            using (SolidBrush bgBrush = new SolidBrush(bgColor))
+            if (image)
             {
-                g.FillRectangle(bgBrush, bounds);
-            }
-
-            if (isSelected)
-            {
-                using (SolidBrush selBar = new SolidBrush(Brand.MossGreen))
-                {
-                    g.FillRectangle(selBar, bounds.X, bounds.Y, 4, bounds.Height);
-                }
-            }
-
-            using (Pen divPen = new Pen(Brand.BorderLight, 1))
-            {
-                g.DrawLine(divPen, bounds.X + 8, bounds.Bottom - 1, bounds.Right - 8, bounds.Bottom - 1);
-            }
-
-            string kind = item.IsSensitive ? "PROTECTED" : (item.Kind ?? "TEXT");
-            bool isImage = !item.IsSensitive && string.Equals(kind, "IMAGE", StringComparison.OrdinalIgnoreCase);
-            int contentLeft = bounds.X + 14;
-            if (isImage)
-            {
-                Bitmap thumbnail = GetImageThumbnail(item);
-                Rectangle imageBounds = new Rectangle(contentLeft, bounds.Y + 8, 38, 38);
-                using (SolidBrush imageBackground = new SolidBrush(Brand.WarmWoolCanvas))
-                    g.FillRectangle(imageBackground, imageBounds);
+                Rectangle thumbnailBox = new Rectangle(card.Left + 10, card.Top + 10, 42, 40);
+                DrawRoundedCard(graphics, thumbnailBox, Brand.Canvas, Brand.BorderLight, false);
+                Bitmap thumbnail = GetImageThumbnail(entry);
                 if (thumbnail != null)
-                    g.DrawImageUnscaled(thumbnail, imageBounds.X + (imageBounds.Width - thumbnail.Width) / 2,
-                        imageBounds.Y + (imageBounds.Height - thumbnail.Height) / 2);
-                using (Pen imageBorder = new Pen(Brand.BorderLight))
-                    g.DrawRectangle(imageBorder, imageBounds);
-                contentLeft += 48;
-            }
-            Color badgeBg = Brand.GetKindBadgeBg(kind);
-            Color badgeFg = Brand.GetKindBadgeFg(kind);
-            int badgeWidth = item.IsSensitive ? 86 : 54;
-            Rectangle badgeRect = new Rectangle(contentLeft, bounds.Y + 8, badgeWidth, 18);
-
-            using (SolidBrush badgeBrush = new SolidBrush(badgeBg))
-            {
-                g.FillRectangle(badgeBrush, badgeRect);
-            }
-            using (SolidBrush badgeTextBrush = new SolidBrush(badgeFg))
-            using (StringFormat sf = new StringFormat())
-            {
-                sf.Alignment = StringAlignment.Center;
-                sf.LineAlignment = StringAlignment.Center;
-                sf.FormatFlags = StringFormatFlags.NoWrap;
-                g.DrawString(kind, _fontBold75, badgeTextBrush, badgeRect, sf);
-            }
-
-            int rightOffset = bounds.Right - 14;
-            if (item.IsPinned)
-            {
-                using (SolidBrush pinBrush = new SolidBrush(Brand.MossGreen))
+                    graphics.DrawImageUnscaled(thumbnail, thumbnailBox.Left + (thumbnailBox.Width - thumbnail.Width) / 2,
+                        thumbnailBox.Top + (thumbnailBox.Height - thumbnail.Height) / 2);
+                else Brand.DrawIcon(graphics, "image", new Rectangle(thumbnailBox.Left + 12, thumbnailBox.Top + 11, 18, 18), Brand.TextMuted);
+                TextRenderer.DrawText(graphics, "Clipboard image", _fontBold90,
+                    new Rectangle(textLeft, card.Top + 9, titleWidth, 18), Brand.TextPrimary,
+                    TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                string snippet = HasOcrText(entry) ? entry.OcrText :
+                    entry.OcrStatus == OcrStates.Pending ? "Reading text from image..." :
+                    entry.OcrStatus == OcrStates.NoText ? "No text found in image" : "Text recognition unavailable";
+                snippet = CompactSnippet(snippet, 200);
+                TextRenderer.DrawText(graphics, snippet, _fontRegular85,
+                    new Rectangle(textLeft, card.Top + 30, Math.Max(1, card.Right - textLeft - 12), 18), Brand.TextSecondary,
+                    TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                foreach (ImageCopyTarget target in new[] { ImageCopyTarget.Image, ImageCopyTarget.OcrText, ImageCopyTarget.Base64 })
                 {
-                    g.DrawString("★", _fontNavBold, pinBrush, rightOffset - 16, bounds.Y + 8);
-                }
-                rightOffset -= 22;
-            }
-
-            string timeStr = FormatRelativeTime(item.CapturedUtc);
-            using (SolidBrush timeBrush = new SolidBrush(Brand.TextSecondary))
-            {
-                SizeF timeSize = g.MeasureString(timeStr, _fontRegular80);
-                g.DrawString(timeStr, _fontRegular80, timeBrush, rightOffset - timeSize.Width, bounds.Y + 9);
-            }
-
-            Rectangle textRect = new Rectangle(contentLeft, bounds.Y + 29, bounds.Right - contentLeft - 14, 21);
-            if (item.IsSensitive)
-            {
-                using (SolidBrush sensBrush = new SolidBrush(Brand.SensitiveFg))
-                {
-                    g.DrawString("[Protected content removed]", _fontPreviewItalic, sensBrush, textRect);
+                    Rectangle chip = GetImageTargetBounds(e.Index, target);
+                    if (chip.IsEmpty) continue;
+                    bool active = selected && target == _imageCopyTarget;
+                    if (active) DrawRoundedCard(graphics, chip, Brand.AccentSoft, Brand.AccentSoft, false);
+                    string label = target == ImageCopyTarget.Image ? "Image" : target == ImageCopyTarget.OcrText ? "Text" : "Base64";
+                    string icon = target == ImageCopyTarget.Image ? "image" : target == ImageCopyTarget.OcrText ? "text" : "binary";
+                    Color color = active ? Brand.HeaderBlue : Brand.TextSecondary;
+                    Brand.DrawIcon(graphics, icon, new Rectangle(chip.Left + 6, chip.Top + 5, 12, 12), color);
+                    TextRenderer.DrawText(graphics, label, active ? _fontBold80 : _fontRegular80,
+                        new Rectangle(chip.Left + 21, chip.Top + 2, chip.Width - 24, chip.Height - 4), color,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
                 }
             }
             else
             {
-                string snippet = item.Text ?? "";
-                if (isImage && snippet.Length > 160) snippet = snippet.Substring(0, 160);
-                snippet = snippet.Replace("\r\n", " ").Replace("\n", " ").Replace("\t", " ");
-                TextRenderer.DrawText(
-                    g,
-                    snippet,
-                    _fontRegular90,
-                    textRect,
-                    Brand.TextPrimary,
-                    TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+                string kind = entry.IsSensitive ? "PROTECTED" : entry.Kind ?? "TEXT";
+                Rectangle glyph = new Rectangle(card.Left + 10, card.Top + 4, 29, 28);
+                DrawRoundedCard(graphics, glyph, selected ? Brand.AccentSoft : Brand.Canvas,
+                    selected ? Brand.AccentSoft : Brand.Canvas, false);
+                string icon = kind == "LINK" ? "link" : kind == "CODE" ? "code" : "text";
+                Brand.DrawIcon(graphics, icon, new Rectangle(glyph.Left + 6, glyph.Top + 6, 16, 16),
+                    selected ? Brand.HeaderBlue : Brand.TextMuted);
+                TextRenderer.DrawText(graphics, entry.IsSensitive ? "Protected content removed" : CompactSnippet(entry.Text, 240),
+                    kind == "CODE" ? _fontPreviewCode : _fontRegular90,
+                    new Rectangle(textLeft, card.Top + 7, titleWidth, 22), Brand.TextPrimary,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             }
+        }
+
+        private static string CompactSnippet(string value, int maxLength)
+        {
+            string snippet = value ?? "";
+            if (snippet.Length > maxLength) snippet = snippet.Substring(0, maxLength);
+            return snippet.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+        }
+        private void DrawClipSnippet(Graphics graphics, string text, Rectangle bounds)
+        {
+            string snippet = text ?? "";
+            if (snippet.Length > 240) snippet = snippet.Substring(0, 240);
+            snippet = snippet.Replace("\r\n", " ").Replace("\n", " ").Replace("\t", " ");
+            TextRenderer.DrawText(graphics, snippet, _fontRegular90, bounds, Brand.TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
         }
 
         private void OnListBoxSelectedIndexChanged(object sender, EventArgs e)
         {
-            UpdateDetailPane();
+            if (!_changingListItems) UpdateDetailPane();
         }
-
 
 
         private static string FormatRelativeTime(DateTime utcTime)
@@ -1658,7 +2027,72 @@ namespace DollyPaste
                 ShowFromTray();
                 return;
             }
+            if (m.Msg == 0x0083) // WM_NCCALCSIZE: the custom frame occupies the full client area.
+            {
+                m.Result = IntPtr.Zero;
+                return;
+            }
+            if (m.Msg == 0x0084 && WindowState == FormWindowState.Normal) // WM_NCHITTEST
+            {
+                long position = m.LParam.ToInt64();
+                Point point = PointToClient(new Point((short)(position & 0xffff), (short)((position >> 16) & 0xffff)));
+                int hit = GetFrameHitTest(point, ClientSize);
+                if (hit != 1) { m.Result = new IntPtr(hit); return; }
+            }
             base.WndProc(ref m);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams parameters = base.CreateParams;
+                // Preserve native sizing and minimum-size enforcement without a native caption.
+                parameters.Style |= 0x00040000; // WS_THICKFRAME
+                parameters.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
+                return parameters;
+            }
+        }
+
+        internal static int GetFrameHitTest(Point point, Size size)
+        {
+            const int edge = 5;
+            bool left = point.X < edge;
+            bool right = point.X >= size.Width - edge;
+            bool top = point.Y < edge;
+            bool bottom = point.Y >= size.Height - edge;
+            if (top && left) return 13;
+            if (top && right) return 14;
+            if (bottom && left) return 16;
+            if (bottom && right) return 17;
+            if (left) return 10;
+            if (right) return 11;
+            if (top) return 12;
+            if (bottom) return 15;
+            return 1;
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            base.OnPaintBackground(e);
+            int headerBottom = _pnlSearchFilter == null ? 97 : _pnlSearchFilter.Bottom + Padding.Top;
+            using (Brush blue = new SolidBrush(Brand.HeaderBlue))
+                e.Graphics.FillRectangle(blue, 0, 0, Width, headerBottom);
+            if (_pnlDetailToolbar != null && _pnlStatusBar != null)
+            {
+                int footerTop = _pnlDetailToolbar.Top + Padding.Top;
+                using (Brush surface = new SolidBrush(Brand.Surface))
+                    e.Graphics.FillRectangle(surface, 0, footerTop, Width, Math.Max(0, Height - footerTop));
+            }
+            if (Width > 1 && Height > 1)
+                using (Pen border = new Pen(Brand.Border)) e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            Invalidate();
+            if (_listBoxClips != null) _listBoxClips.Invalidate();
         }
 
         protected override void Dispose(bool disposing)
@@ -1754,12 +2188,20 @@ namespace DollyPaste
         internal ListBox ClipsListBox { get { return _listBoxClips; } }
         internal TextBox PreviewTextBox { get { return _txtPreview; } }
         internal PictureBox ImagePreviewBox { get { return _picImagePreview; } }
+        internal Panel ImageActionsPanel { get { return _pnlImageActions; } }
+        internal Panel OcrPreviewPanel { get { return _pnlOcrPreview; } }
+        internal TextBox OcrPreviewTextBox { get { return _txtOcrPreview; } }
+        internal Button CopyImageBase64Button { get { return _btnCopyImageBase64; } }
+        internal Button CopyImageTextButton { get { return _btnCopyImageText; } }
         internal int CachedImageThumbnailCount { get { return _imageThumbnails.Count; } }
         internal Button CopyButton { get { return _btnCopy; } }
         internal Button PinButton { get { return _btnPin; } }
         internal Button DeleteButton { get { return _btnDelete; } }
         internal Button PauseResumeButton { get { return _btnPauseResume; } }
         internal Button SettingsButton { get { return _btnSettings; } }
+        internal Button CloseButton { get { return _btnClose; } }
+        internal Rectangle HeaderSheepBounds { get { return new Rectangle(7, 0, 36, 36); } }
+        internal Panel TypeFilterPanel { get { return _pnlTypeFilters; } }
         internal Button FilterAllButton { get { return _btnFilterAll; } }
         internal Button FilterTextButton { get { return _btnFilterText; } }
         internal Button FilterLinkButton { get { return _btnFilterLink; } }

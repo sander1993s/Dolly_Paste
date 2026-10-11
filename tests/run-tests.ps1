@@ -1,3 +1,9 @@
+param(
+    [ValidateSet('All', 'Core', 'Platform', 'Ui', 'Ocr', 'OcrIntegration')]
+    [string]$Suite = 'All',
+    [switch]$NativeOcrSmoke
+)
+
 $ErrorActionPreference = "Stop"
 
 # Resolve project root parent of PSScriptRoot
@@ -80,13 +86,18 @@ $commonRefs = @(
     "/r:$refUIAuthTypes",
     "/r:$refWindowsBase"
 )
+. (Join-Path $projectRoot 'scripts\Get-WindowsOcrReferences.ps1')
+$commonRefs += @(Get-WindowsOcrReferences -FrameworkDirectory $cscDir)
 
 $srcDir = Join-Path $projectRoot "src"
 $testsDir = Join-Path $projectRoot "tests"
+$coreSrcFile = Join-Path $srcDir "Core.cs"
+$imageSrcFile = Join-Path $srcDir "ImagePayload.cs"
 
 try {
+    if ($Suite -eq 'All' -or $Suite -eq 'Core') {
     # 4. Suite 1: CoreTests (Required)
-    Write-Host "`n--- [1/3] CoreTests Suite ---" -ForegroundColor Cyan
+    Write-Host "`n--- CoreTests Suite ---" -ForegroundColor Cyan
 
     $coreSrcFile = Join-Path $srcDir "Core.cs"
     if (-not (Test-Path -LiteralPath $coreSrcFile)) {
@@ -122,9 +133,11 @@ try {
         exit $LASTEXITCODE
     }
     Write-Host "Passed: CoreTests" -ForegroundColor Green
+    }
 
+    if ($Suite -eq 'All' -or $Suite -eq 'Platform') {
     # 5. Suite 2: PlatformTests (Required)
-    Write-Host "`n--- [2/3] PlatformTests Suite ---" -ForegroundColor Cyan
+    Write-Host "`n--- PlatformTests Suite ---" -ForegroundColor Cyan
 
     $clipSrcFile = Join-Path $srcDir "WindowsClipboard.cs"
     if (-not (Test-Path -LiteralPath $clipSrcFile)) {
@@ -159,7 +172,9 @@ try {
         exit $LASTEXITCODE
     }
     Write-Host "Passed: PlatformTests" -ForegroundColor Green
+    }
 
+    if ($Suite -eq 'All' -or $Suite -eq 'Ui') {
     # 6. Suite 3: UiTests (Desktop UI & Layout Verification)
     $uiTestFile = Join-Path $testsDir "UiTests.cs"
     if (-not (Test-Path -LiteralPath $uiTestFile)) {
@@ -167,7 +182,7 @@ try {
         exit 1
     }
 
-    Write-Host "`n--- [3/3] UiTests Suite ---" -ForegroundColor Cyan
+    Write-Host "`n--- UiTests Suite ---" -ForegroundColor Cyan
 
     $allSrcFiles = Get-ChildItem -Path $srcDir -Filter "*.cs" | ForEach-Object { $_.FullName }
     $manifestPath = Join-Path $projectRoot "app.manifest"
@@ -197,8 +212,31 @@ try {
         exit $LASTEXITCODE
     }
     Write-Host "Passed: UiTests" -ForegroundColor Green
+    }
 
-    Write-Host "`nAll test suites passed successfully." -ForegroundColor Green
+    foreach ($ocrSuite in @('Ocr', 'OcrIntegration')) {
+        if ($Suite -ne 'All' -and $Suite -ne $ocrSuite) { continue }
+        $ocrExe = Join-Path $tempDirFull ($ocrSuite + 'Tests.exe')
+        $ocrSources = @($imageSrcFile, (Join-Path $srcDir 'OcrService.cs'),
+            (Join-Path $testsDir ($ocrSuite + 'Tests.cs')))
+        if ($ocrSuite -eq 'OcrIntegration') {
+            $ocrSources += @($coreSrcFile, (Join-Path $srcDir 'OcrHistoryProcessor.cs'))
+        }
+        Write-Host "Compiling $ocrSuite tests..." -ForegroundColor Gray
+        $ocrArgs = @('/nologo', '/target:exe', "/out:$ocrExe") + $commonRefs + $ocrSources
+        & $csc @ocrArgs
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $ocrExe)) {
+            throw "$ocrSuite tests compilation failed with exit code $LASTEXITCODE."
+        }
+        & $ocrExe
+        if ($LASTEXITCODE -ne 0) { throw "$ocrSuite tests failed with exit code $LASTEXITCODE." }
+        if ($ocrSuite -eq 'Ocr' -and $NativeOcrSmoke) {
+            & $ocrExe --native-smoke
+            if ($LASTEXITCODE -ne 0) { throw "Windows OCR smoke test failed with exit code $LASTEXITCODE." }
+        }
+    }
+
+    Write-Host "`nSelected test suites passed successfully ($Suite)." -ForegroundColor Green
 }
 finally {
     # Clean up scoped temporary directory using -LiteralPath

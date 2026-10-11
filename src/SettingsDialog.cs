@@ -20,6 +20,7 @@ namespace DollyPaste
         private Panel _pnlHeader;
         private Panel _pnlBottom;
         private Panel _pnlBody;
+        private bool _layingOutBody;
 
         private Label _lblRetentionHeader;
         private NumericUpDown _numMaxAge;
@@ -78,12 +79,12 @@ namespace DollyPaste
         {
             _fontTitle = Brand.CreateFont(13f, FontStyle.Bold);
             _fontSubtitle = Brand.CreateFont(8.5f, FontStyle.Regular);
-            _fontSectionHeader = Brand.CreateFont(9.5f, FontStyle.Bold);
-            _fontRegular = Brand.CreateFont(9.0f, FontStyle.Regular);
-            _fontBold = Brand.CreateFont(9.0f, FontStyle.Bold);
-            _fontSmall = Brand.CreateFont(8.0f, FontStyle.Regular);
-            _fontItalic = Brand.CreateFont(8.0f, FontStyle.Italic);
-            _fontNoticeTitle = Brand.CreateFont(8.5f, FontStyle.Bold);
+            _fontSectionHeader = Brand.CreateFont(10.0f, FontStyle.Bold);
+            _fontRegular = Brand.CreateFont(9.5f, FontStyle.Regular);
+            _fontBold = Brand.CreateFont(9.5f, FontStyle.Bold);
+            _fontSmall = Brand.CreateFont(8.5f, FontStyle.Regular);
+            _fontItalic = Brand.CreateFont(8.5f, FontStyle.Regular);
+            _fontNoticeTitle = Brand.CreateFont(9.0f, FontStyle.Bold);
         }
 
         private void InitializeComponent()
@@ -110,7 +111,7 @@ namespace DollyPaste
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ShowInTaskbar = false;
-            this.BackColor = Brand.WarmWoolCanvas;
+            this.BackColor = Brand.Canvas;
             this.Font = _fontRegular;
             _dialogIcon = Brand.CreateAppIcon();
             this.Icon = _dialogIcon;
@@ -119,11 +120,14 @@ namespace DollyPaste
             _pnlHeader = new Panel();
             _pnlHeader.Dock = DockStyle.Top;
             _pnlHeader.Height = 72;
-            _pnlHeader.BackColor = Color.White;
+            _pnlHeader.BackColor = Brand.Surface;
             _pnlHeader.Paint += delegate(object sender, PaintEventArgs e)
             {
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                Brand.DrawSheep(e.Graphics, new RectangleF(16, 12, 48, 48));
+                using (GraphicsPath path = Brand.CreateRoundedPath(new RectangleF(16, 12, 48, 48), 14))
+                using (SolidBrush brush = new SolidBrush(Brand.AccentSoft))
+                    e.Graphics.FillPath(brush, path);
+                Brand.DrawSheep(e.Graphics, new RectangleF(20, 16, 40, 40));
                 using (Pen p = new Pen(Brand.BorderLight, 1))
                 {
                     e.Graphics.DrawLine(p, 0, _pnlHeader.Height - 1, _pnlHeader.Width, _pnlHeader.Height - 1);
@@ -131,7 +135,7 @@ namespace DollyPaste
             };
 
             Label lblTitle = new Label();
-            lblTitle.Text = "Dolly Paste Settings";
+            lblTitle.Text = "Settings";
             lblTitle.Font = _fontTitle;
             lblTitle.ForeColor = Brand.TextPrimary;
             lblTitle.Location = new Point(76, 14);
@@ -139,7 +143,7 @@ namespace DollyPaste
             _pnlHeader.Controls.Add(lblTitle);
 
             Label lblSubtitle = new Label();
-            lblSubtitle.Text = "Local retention and optional encrypted storage";
+            lblSubtitle.Text = "Dolly Paste · Local history, your preferences";
             lblSubtitle.Font = _fontSubtitle;
             lblSubtitle.ForeColor = Brand.TextSecondary;
             lblSubtitle.Location = new Point(77, 40);
@@ -150,7 +154,7 @@ namespace DollyPaste
             _pnlBottom = new Panel();
             _pnlBottom.Dock = DockStyle.Bottom;
             _pnlBottom.Height = 54;
-            _pnlBottom.BackColor = Color.White;
+            _pnlBottom.BackColor = Brand.Surface;
             _pnlBottom.Paint += delegate(object sender, PaintEventArgs e)
             {
                 using (Pen p = new Pen(Brand.BorderLight, 1))
@@ -159,26 +163,20 @@ namespace DollyPaste
                 }
             };
 
-            _btnSave = new Button();
+            _btnSave = new BrandButton();
             _btnSave.Text = "Save Settings";
             _btnSave.Font = _fontBold;
-            _btnSave.BackColor = Brand.MossGreen;
-            _btnSave.ForeColor = Color.White;
-            _btnSave.FlatStyle = FlatStyle.Flat;
-            _btnSave.FlatAppearance.BorderSize = 0;
-            _btnSave.Size = new Size(115, 32);
+            Brand.StyleButton(_btnSave, true);
+            _btnSave.Size = new Size(128, 34);
             _btnSave.AccessibleName = "Save settings";
             _btnSave.Click += OnSaveClicked;
             _pnlBottom.Controls.Add(_btnSave);
 
-            _btnCancel = new Button();
+            _btnCancel = new BrandButton();
             _btnCancel.Text = "Cancel";
             _btnCancel.Font = _fontRegular;
-            _btnCancel.BackColor = Brand.WarmWoolCanvas;
-            _btnCancel.ForeColor = Brand.TextPrimary;
-            _btnCancel.FlatStyle = FlatStyle.Flat;
-            _btnCancel.FlatAppearance.BorderColor = Brand.Border;
-            _btnCancel.Size = new Size(95, 32);
+            Brand.StyleButton(_btnCancel, false);
+            _btnCancel.Size = new Size(95, 34);
             _btnCancel.AccessibleName = "Cancel settings";
             _btnCancel.Click += delegate { this.DialogResult = DialogResult.Cancel; this.Close(); };
             _pnlBottom.Controls.Add(_btnCancel);
@@ -194,11 +192,11 @@ namespace DollyPaste
             _pnlBody.Dock = DockStyle.Fill;
             _pnlBody.AutoScroll = true;
             _pnlBody.Padding = new Padding(16, 12, 16, 12);
-            _pnlBody.BackColor = Brand.WarmWoolCanvas;
+            _pnlBody.BackColor = Brand.Canvas;
 
             // Controls inside body
             _lblRetentionHeader = new Label();
-            _lblRetentionHeader.Text = "Retention Period (Minutes)";
+            _lblRetentionHeader.Text = "Keep clips for (minutes)";
             _lblRetentionHeader.Font = _fontSectionHeader;
             _lblRetentionHeader.ForeColor = Brand.TextPrimary;
             _lblRetentionHeader.AutoSize = true;
@@ -210,22 +208,25 @@ namespace DollyPaste
             _numMaxAge.Maximum = 43200;
             _numMaxAge.Increment = 60;
             _numMaxAge.AccessibleName = "Retention minutes";
+            _numMaxAge.BackColor = Brand.Surface;
+            _numMaxAge.ForeColor = Brand.TextPrimary;
+            _numMaxAge.BorderStyle = BorderStyle.FixedSingle;
             _numMaxAge.ValueChanged += OnMaxAgeChanged;
             _pnlBody.Controls.Add(_numMaxAge);
 
             _lblMaxAgeHelper = new Label();
             _lblMaxAgeHelper.Font = _fontRegular;
-            _lblMaxAgeHelper.ForeColor = Brand.MossGreenDark;
+            _lblMaxAgeHelper.ForeColor = Brand.AccentHover;
             _pnlBody.Controls.Add(_lblMaxAgeHelper);
 
             _lblPinExpiryNotice = new Label();
-            _lblPinExpiryNotice.Text = "Notice: Pinned clips also expire when retention limits are reached.";
+            _lblPinExpiryNotice.Text = "Pinned clips follow the same retention limits.";
             _lblPinExpiryNotice.Font = _fontItalic;
             _lblPinExpiryNotice.ForeColor = Brand.TextSecondary;
             _pnlBody.Controls.Add(_lblPinExpiryNotice);
 
             _lblMaxItemsHeader = new Label();
-            _lblMaxItemsHeader.Text = "Maximum History Capacity (Items)";
+            _lblMaxItemsHeader.Text = "History capacity (clips)";
             _lblMaxItemsHeader.Font = _fontSectionHeader;
             _lblMaxItemsHeader.ForeColor = Brand.TextPrimary;
             _lblMaxItemsHeader.AutoSize = true;
@@ -237,10 +238,13 @@ namespace DollyPaste
             _numMaxItems.Maximum = 1000;
             _numMaxItems.Increment = 10;
             _numMaxItems.AccessibleName = "Maximum items";
+            _numMaxItems.BackColor = Brand.Surface;
+            _numMaxItems.ForeColor = Brand.TextPrimary;
+            _numMaxItems.BorderStyle = BorderStyle.FixedSingle;
             _pnlBody.Controls.Add(_numMaxItems);
 
             _lblMaxItemsHelp = new Label();
-            _lblMaxItemsHelp.Text = "Range: 10 to 1,000 clips. Oldest unpinned clips are pruned first.";
+            _lblMaxItemsHelp.Text = "10–1,000 clips. Oldest unpinned clips go first.";
             _lblMaxItemsHelp.Font = _fontSubtitle;
             _lblMaxItemsHelp.ForeColor = Brand.TextSecondary;
             _pnlBody.Controls.Add(_lblMaxItemsHelp);
@@ -254,42 +258,48 @@ namespace DollyPaste
 
             // Privacy Notice / Caveats Card
             _pnlNotice = new Panel();
-            _pnlNotice.BackColor = Color.FromArgb(254, 252, 248);
+            _pnlNotice.BackColor = Brand.Canvas;
             _pnlNotice.Paint += delegate(object sender, PaintEventArgs e)
             {
-                using (Pen p = new Pen(Brand.Border, 1))
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (GraphicsPath path = Brand.CreateRoundedPath(new RectangleF(0.5f, 0.5f,
+                    _pnlNotice.Width - 1, _pnlNotice.Height - 1), 12))
+                using (SolidBrush brush = new SolidBrush(Brand.Surface))
+                using (Pen p = new Pen(Brand.BorderLight, 1))
                 {
-                    e.Graphics.DrawRectangle(p, 0, 0, _pnlNotice.Width - 1, _pnlNotice.Height - 1);
+                    e.Graphics.FillPath(brush, path);
+                    e.Graphics.DrawPath(p, path);
                 }
             };
 
             _lblNoticeTitle = new Label();
-            _lblNoticeTitle.Text = "Privacy & Platform Considerations";
+            _lblNoticeTitle.Text = "Local by design";
             _lblNoticeTitle.Font = _fontNoticeTitle;
             _lblNoticeTitle.ForeColor = Brand.TextPrimary;
+            _lblNoticeTitle.BackColor = Brand.Surface;
             _lblNoticeTitle.AutoSize = true;
             _pnlNotice.Controls.Add(_lblNoticeTitle);
 
             _lblNoticeBody = new Label();
-            _lblNoticeBody.Text = "• Default session-only: Clips stay in memory unless encrypted persistence is checked.\n" +
-                                 "• Copies stay in history: Pasting into password fields or other destinations does not censor or remove clips.\n" +
-                                 "• App exclusions: Clipboard content marked by its source app as excluded from history is not recorded.\n" +
-                                 "• Windows clipboard: Windows system clipboard and history (Win+V) are managed separately.\n" +
-                                 "• Plain text only: Rich formatting stripped; max 32,768 characters. Standard memory reclamation (not forensic secure erasure).";
+            _lblNoticeBody.Text = "• History stays on this PC, in memory unless encrypted storage is enabled.\n" +
+                                 "• Images copy as pictures by default; OCR text and Base64 are separate choices. Text recognition runs locally through Windows.\n" +
+                                 "• Copying does not remove saved clips. Content excluded by its source app is not recorded.\n" +
+                                 "• Windows clipboard history (Win+V) is managed separately. Removed data uses normal memory cleanup, not secure erasure.";
             _lblNoticeBody.Font = _fontSmall;
             _lblNoticeBody.ForeColor = Brand.TextSecondary;
+            _lblNoticeBody.BackColor = Brand.Surface;
             _pnlNotice.Controls.Add(_lblNoticeBody);
 
             _pnlBody.Controls.Add(_pnlNotice);
 
-            _btnClearHistory = new Button();
+            _btnClearHistory = new BrandButton();
             _btnClearHistory.Text = "Clear All History...";
             _btnClearHistory.Font = _fontSubtitle;
+            Brand.StyleButton(_btnClearHistory, false);
             _btnClearHistory.ForeColor = Brand.SensitiveFg;
-            _btnClearHistory.BackColor = Color.White;
-            _btnClearHistory.FlatStyle = FlatStyle.Flat;
-            _btnClearHistory.FlatAppearance.BorderColor = Color.FromArgb(235, 185, 185);
-            _btnClearHistory.Size = new Size(150, 28);
+            _btnClearHistory.FlatAppearance.MouseOverBackColor = Brand.SensitiveBg;
+            _btnClearHistory.FlatAppearance.MouseDownBackColor = Brand.SensitiveBg;
+            _btnClearHistory.Size = new Size(160, 32);
             _btnClearHistory.AccessibleName = "Clear all clipboard history";
             _btnClearHistory.Click += OnClearHistoryClicked;
             _pnlBody.Controls.Add(_btnClearHistory);
@@ -311,9 +321,16 @@ namespace DollyPaste
 
         private void LayoutBody()
         {
-            if (_pnlBody == null || _lblPinExpiryNotice == null) return;
+            if (_pnlBody == null || _lblPinExpiryNotice == null || _layingOutBody) return;
 
-            int availWidth = Math.Max(260, _pnlBody.ClientSize.Width - 36);
+            _layingOutBody = true;
+            _pnlBody.SuspendLayout();
+            try
+            {
+
+            // Reserve the scrollbar gutter so a smaller window only scrolls
+            // vertically instead of gaining a horizontal bar during reflow.
+            int availWidth = Math.Max(260, _pnlBody.ClientSize.Width - 36 - SystemInformation.VerticalScrollBarWidth);
             int currentY = 12;
 
             _lblRetentionHeader.Location = new Point(14, currentY);
@@ -348,19 +365,28 @@ namespace DollyPaste
             // Privacy Notice / Caveats Card
             _pnlNotice.Location = new Point(16, currentY);
             _pnlNotice.Width = availWidth;
-            _lblNoticeTitle.Location = new Point(8, 6);
-            _lblNoticeBody.Location = new Point(8, 26);
-            _lblNoticeBody.MaximumSize = new Size(availWidth - 16, 0);
+            _lblNoticeTitle.Location = new Point(14, 12);
+            _lblNoticeBody.Location = new Point(14, 36);
+            _lblNoticeBody.MaximumSize = new Size(availWidth - 28, 0);
             _lblNoticeBody.AutoSize = true;
             int noticeBodyHeight = _lblNoticeBody.PreferredHeight;
-            _lblNoticeBody.Size = new Size(availWidth - 16, Math.Max(60, noticeBodyHeight));
-            _pnlNotice.Height = _lblNoticeBody.Bottom + 10;
+            _lblNoticeBody.Size = new Size(availWidth - 28, Math.Max(60, noticeBodyHeight));
+            _pnlNotice.Height = _lblNoticeBody.Bottom + 14;
             currentY += _pnlNotice.Height + 16;
 
             _btnClearHistory.Location = new Point(16, currentY);
             currentY += _btnClearHistory.Height + 16;
 
             _pnlBody.AutoScrollMinSize = new Size(0, currentY);
+            }
+            finally
+            {
+                _pnlBody.ResumeLayout(true);
+                // Recompute scroll extents after the resize-triggered layout
+                // has applied all child bounds, removing any stale horizontal bar.
+                _pnlBody.PerformLayout();
+                _layingOutBody = false;
+            }
         }
 
         private void UpdateBottomButtonsLayout()
