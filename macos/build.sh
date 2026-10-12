@@ -41,7 +41,7 @@ else
     codesign --force --sign - "$staged"
 fi
 codesign --verify --deep --strict "$staged"
-xcrun lipo -verify_arch arm64 x86_64 "$staged/Contents/MacOS/DollyPaste"
+xcrun lipo "$staged/Contents/MacOS/DollyPaste" -verify_arch arm64 x86_64
 
 # Only replace the known build output after compilation and signing succeed.
 if [[ -e "$app" ]]; then mv "$app" "$work/previous.app"; fi

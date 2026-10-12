@@ -20,6 +20,8 @@ jobs:
         run: bash macos/test.sh
       - name: Build universal application
         run: bash macos/build.sh
+      - name: Package drag-to-Applications installer
+        run: bash macos/package.sh
       - name: Render synthetic preview without clipboard access
         run: |
           "dist/macos/Dolly Paste.app/Contents/MacOS/DollyPaste" --preview "$RUNNER_TEMP/dolly-macos-preview.png"
@@ -31,6 +33,8 @@ jobs:
           name: Dolly-Paste-macOS
           path: |
             dist/macos/Dolly-Paste-macOS.zip
+            dist/macos/Dolly-Paste-macOS.dmg
+            dist/macos/SHA256SUMS.txt
             ${{ runner.temp }}/dolly-macos-preview.png
           if-no-files-found: error
 

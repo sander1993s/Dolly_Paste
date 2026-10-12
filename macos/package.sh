@@ -1,0 +1,123 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != Darwin ]]; then
+    echo "The macOS installer must be packaged on a Mac with Xcode Command Line Tools." >&2
+    exit 1
+fi
+if [[ -n "${NOTARY_PROFILE:-}" && ( -z "${CODESIGN_IDENTITY:-}" || "${CODESIGN_IDENTITY}" == - ) ]]; then
+    echo "NOTARY_PROFILE requires a Developer ID Application CODESIGN_IDENTITY." >&2
+    exit 1
+fi
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+output="$root/dist/macos"
+app="$output/Dolly Paste.app"
+if [[ ! -d "$app" ]]; then
+    echo "Missing app: $app. Maintainers must run bash macos/build.sh first." >&2
+    exit 1
+fi
+codesign --verify --deep --strict "$app"
+xcrun lipo "$app/Contents/MacOS/DollyPaste" -verify_arch arm64 x86_64
+
+# Work on a copy so a signing, notarization, or packaging failure cannot damage
+# the app or any previously produced installer. All temporary files stay here.
+work="$(mktemp -d "$output/.package-XXXXXXXX")"
+cleanup() {
+    case "$work" in
+        "$output"/.package-*) rm -rf -- "$work" ;;
+    esac
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+staging="$work/installer"
+staged_app="$staging/Dolly Paste.app"
+mkdir -p "$staging"
+ditto "$app" "$staged_app"
+
+# Passing an identity signs the staged app as well as the disk image, even if
+# the input app was a local ad-hoc build. No Apple upload occurs without an
+# explicit NOTARY_PROFILE naming credentials already stored in the Keychain.
+if [[ -n "${CODESIGN_IDENTITY:-}" && "${CODESIGN_IDENTITY}" != - ]]; then
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$staged_app"
+fi
+codesign --verify --deep --strict "$staged_app"
+
+notarize() {
+    local artifact="$1"
+    local label="$2"
+    local response="$work/$label-submission.json"
+    local status submission_id
+    xcrun notarytool submit "$artifact" --keychain-profile "$NOTARY_PROFILE" \
+        --wait --output-format json > "$response"
+    cat "$response"
+    status="$(plutil -extract status raw -o - "$response")"
+    submission_id="$(plutil -extract id raw -o - "$response")"
+    # The CLI can finish successfully even when Apple's final status is Invalid.
+    # Its log also includes warnings on otherwise accepted submissions.
+    xcrun notarytool log "$submission_id" --keychain-profile "$NOTARY_PROFILE"
+    if [[ "$status" != Accepted ]]; then
+        echo "Apple did not accept $label for notarization (status: $status)." >&2
+        return 1
+    fi
+}
+
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+    ditto -c -k --sequesterRsrc --keepParent "$staged_app" "$work/notarization.zip"
+    notarize "$work/notarization.zip" app
+    xcrun stapler staple "$staged_app"
+    xcrun stapler validate "$staged_app"
+    spctl --assess --type execute --verbose=2 "$staged_app"
+fi
+
+ln -s /Applications "$staging/Applications"
+cp "$root/macos/INSTALL.txt" "$staging/INSTALL.txt"
+if [[ -z "${NOTARY_PROFILE:-}" ]]; then
+    cat >> "$staging/INSTALL.txt" <<'NOTICE'
+
+This build has not been notarized by Apple. macOS may block its first launch.
+If you trust the download, open System Settings > Privacy & Security after
+attempting to launch it, then use Open Anyway for Dolly Paste if offered.
+Your Mac's security policy may prevent this exception.
+NOTICE
+fi
+
+# ZIP users receive the same app, including its ticket when notarized. A ticket
+# cannot be stapled to a ZIP itself, so create this ZIP only after app stapling.
+zip_name="Dolly-Paste-macOS.zip"
+dmg_name="Dolly-Paste-macOS.dmg"
+ditto -c -k --sequesterRsrc --keepParent "$staged_app" "$work/$zip_name"
+hdiutil create -volname "Dolly Paste" -srcfolder "$staging" -format UDZO \
+    -fs HFS+ -ov "$work/$dmg_name"
+if [[ -n "${CODESIGN_IDENTITY:-}" && "${CODESIGN_IDENTITY}" != - ]]; then
+    codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$work/$dmg_name"
+    codesign --verify --strict "$work/$dmg_name"
+fi
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+    notarize "$work/$dmg_name" installer
+    xcrun stapler staple "$work/$dmg_name"
+    xcrun stapler validate "$work/$dmg_name"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$work/$dmg_name"
+fi
+hdiutil verify "$work/$dmg_name"
+codesign --verify --deep --strict "$staged_app"
+xcrun lipo "$staged_app/Contents/MacOS/DollyPaste" -verify_arch arm64 x86_64
+(
+    cd "$work"
+    shasum -a 256 "$dmg_name" "$zip_name" > SHA256SUMS.txt
+    shasum -a 256 -c SHA256SUMS.txt
+)
+
+# Promote only fully verified artifacts, after all Apple requests have finished.
+mv -f "$work/$dmg_name" "$output/$dmg_name"
+mv -f "$work/$zip_name" "$output/$zip_name"
+mv -f "$work/SHA256SUMS.txt" "$output/SHA256SUMS.txt"
+echo "Installer: $output/$dmg_name"
+echo "Archive: $output/$zip_name"
+echo "Checksums: $output/SHA256SUMS.txt"
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+    echo "The app and disk image are signed, notarized, and stapled."
+else
+    echo "This build is not notarized; downloaded copies may require a macOS security exception."
+fi

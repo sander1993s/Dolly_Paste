@@ -2,9 +2,15 @@
 
 A native Swift/AppKit port of Dolly Paste for **macOS 13 Ventura or later**, on **Apple silicon and Intel**. It follows the Windows app's capture, search, pin, retention, preview, and copy workflow using Apple's platform APIs. No Electron, .NET installation, package downloads, server, telemetry, or account is required to run it.
 
-**Verification status:** Implemented on a Windows host. Windows regression tests pass, but the Swift code has not yet been compiled or executed on macOS. The automated Mac build, platform tests, and preview rendering below are required before shipping this as a tested release. No signed/notarized Mac download is published by this change.
+## Download and install
 
-## Build and run
+End users do **not** need Terminal, Xcode, or build commands. Download **Dolly-Paste-macOS.dmg** from the [Mac preview release](https://github.com/sander1993s/Dolly_Paste/releases/tag/macos-v1.0.0-beta.1), open it, and drag **Dolly Paste** into **Applications**. Eject the disk image, then open the app from Applications. The ZIP download contains the same app if you prefer to extract it yourself.
+
+**This preview is not Developer ID signed or notarized by Apple.** If macOS blocks the first launch, and you trust the download, use **System Settings → Privacy & Security → Open Anyway** after trying to open Dolly Paste. See [Apple's instructions](https://support.apple.com/102445). Managed Macs may not permit an exception. No security setting needs to be disabled globally.
+
+The maintainer currently has no Apple Developer signing access. A future Developer ID signed and notarized release can use the same drag-to-Applications installation without that unsigned-app exception. Build commands below are for maintainers only.
+
+## Build and package (maintainers only)
 
 Install Apple's Xcode Command Line Tools (Xcode 15 / Swift 5.9 or newer), then run from the repository root on a Mac:
 
@@ -12,6 +18,7 @@ Install Apple's Xcode Command Line Tools (Xcode 15 / Swift 5.9 or newer), then r
 xcode-select --install  # only if development tools are not installed
 bash macos/test.sh
 bash macos/build.sh
+bash macos/package.sh
 open "dist/macos/Dolly Paste.app"
 ```
 
@@ -19,12 +26,16 @@ The build script compiles both CPU architectures, generates the sheep icon, and 
 
 ```text
 dist/macos/Dolly Paste.app
+dist/macos/Dolly-Paste-macOS.dmg
 dist/macos/Dolly-Paste-macOS.zip
+dist/macos/SHA256SUMS.txt
 ```
 
 Copy the app to Applications if desired. The app runs in the menu bar without a Dock icon. A second normal launch opens the existing instance. No launch agent or login item is installed. To start at login, add the app using macOS Login Items yourself.
 
-Local builds use an ad-hoc code signature. This is not a Developer ID signature or notarization; it does not establish publisher trust for downloaded copies. For distribution, the maintainer can set `CODESIGN_IDENTITY` to an installed Developer ID Application identity before building, then separately notarize and staple the app through Apple. The script does not submit it to Apple or publish it. Keep a stable signing identity across updates to avoid Keychain access prompts. See [Apple's distribution guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+Local builds use an ad-hoc code signature. This is not a Developer ID signature or notarization; it does not establish publisher trust for downloaded copies. If Apple signing access is obtained, set `CODESIGN_IDENTITY` to an installed Developer ID Application identity and `NOTARY_PROFILE` to a notarization credential profile already stored in Keychain before running `macos/package.sh`. That optional path signs the app, submits it to Apple, requires an Accepted result, staples the app, then signs/notarizes/staples the DMG. Both final downloads contain the stapled app. Do not commit certificates, private keys, or notarization credentials. Keep a stable signing identity across updates to avoid Keychain access prompts. See [Apple's distribution guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+
+To publish a new downloadable preview, update `Info.plist` if the app version changes, commit the reviewed source, and push a matching `macos-vX.Y.Z-beta.N` tag. The [release workflow](../.github/workflows/release-macos.yml) compiles and tests on a Mac, generates/verifies the DMG and ZIP, checks their SHA-256 hashes, then publishes a GitHub prerelease with installation instructions and the signing limitation. It refuses to replace an existing release. The current automated path publishes without Developer ID signing, consistent with the maintainer's available access.
 
 ## Everyday use
 
@@ -90,7 +101,7 @@ Preview requires an absolute PNG path with an existing parent directory and writ
 
 `bash macos/test.sh` runs the portable history suite and native platform/UI tests on a Mac. Platform tests use isolated named pasteboards and injected encryption keys, never your general clipboard or real Keychain. On Linux with Swift 5.9 installed, the same command runs just the Foundation history suite.
 
-The [Mac CI workflow](../.github/workflows/macos.yml) tests the core on Linux, tests native code on macOS, builds a universal application, verifies its code signature and architectures, and generates a demo PNG. Its artifact contains the app ZIP and preview for review. CI is configured but was not run from the Windows development session.
+The [Mac CI workflow](../.github/workflows/macos.yml) tests the core on Linux, tests native code on macOS, builds a universal application, verifies its code signature and architectures, creates a DMG and ZIP, and generates a demo PNG. Its artifact contains the installer, ZIP, checksums, and preview for maintainer review. End users download the installer from the release page instead of GitHub Actions artifacts.
 
 Before release, inspect the generated preview and manually verify on a Mac:
 
