@@ -1,5 +1,7 @@
 # Contributing to Dolly Paste
 
+For the native macOS implementation, use the [Mac development guide](macos/README.md). Run `bash macos/test.sh` and `bash macos/build.sh` on macOS 13+ with Xcode 15 / Swift 5.9 or later, then inspect demo mode. Portable history tests can also run on Linux. The instructions below cover the Windows implementation; changes to shared product behavior should consider both versions.
+
 Use Windows 10 or Windows 11 with .NET Framework 4.8 and Windows PowerShell 5.1. Install the Windows 10 SDK and .NET Framework 4.8 Developer Pack for the Windows Runtime compile-time references used by OCR. The project builds with the framework compiler included with Windows; no package restore is required. End users only need the Windows runtime and installed OCR language capabilities, not the SDK or Developer Pack.
 
 ## Development workflow

@@ -36,3 +36,9 @@ Desktop.ini
 *.key
 history.dat*
 settings.json*
+
+# macOS / Swift Package Manager
+.DS_Store
+macos/.build/
+macos/.swiftpm/
+*.xcuserstate

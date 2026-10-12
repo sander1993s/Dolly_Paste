@@ -94,3 +94,10 @@ Inspect the default and minimum popup sizes, expanded preview, and Settings dial
 ## Limits
 
 Automated tests do not cover every third-party application's clipboard behavior or the global shortcut on every desktop configuration. Normal clipboard capture and the Windows clipboard remain separate from the synthetic test fixtures. Dolly Paste does not claim forensic memory erasure.
+## macOS port — 12 October 2026
+
+The native macOS implementation lives in `macos/`. It was authored on Windows, where AppKit/Vision/Keychain compilation and execution are unavailable. Swift tests and the native preview are **not yet verified**. The macOS GitHub Actions workflow builds both architectures, runs portable/native tests, and captures a synthetic preview; it must pass and its preview must be inspected before release. See [Mac test and manual verification instructions](macos/README.md#tests-and-release-verification).
+
+The existing five Windows regression suites were rerun successfully during the port: Core 42, Platform 333 assertions, UI 32, OCR service 9, and OCR integration 5. The initial sandboxed attempt failed on temporary-file/DPAPI access; a normal local run passed all suites. All 18 Swift files parsed without syntax errors using tree-sitter Swift, both shell scripts passed `bash -n`, and the plist and workflow passed structural checks. These checks do not establish native Swift type correctness or successful execution.
+
+The Mac source includes 24 portable history tests, 20 platform tests, and three native picker tests. Platform tests use isolated named pasteboards and injected encryption keys. The UI tests use demo history. None of these test counts represents an executed Mac test result from this Windows session.

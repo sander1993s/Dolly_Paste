@@ -1,6 +1,8 @@
 # Dolly Paste
 
-Dolly Paste is a lightweight, fully local Windows clipboard manager with a white, cool gray, and blue interface inspired by the Smet Software Solutions website, alongside its Merino sheep branding. The interface uses native Windows Forms and runs without external packages or services using the built-in .NET Framework runtime on Windows 10 and Windows 11.
+Dolly Paste is a lightweight, fully local clipboard manager with native versions for Windows and macOS, a white, cool gray, and blue interface, and Merino sheep branding. The Windows application uses Windows Forms and the built-in .NET Framework runtime. The macOS implementation uses Swift and AppKit with Apple's built-in clipboard, Vision OCR, and Keychain APIs; neither application requires third-party runtime packages.
+
+**macOS:** See [the Mac build and usage guide](macos/README.md) for macOS 13+, Intel and Apple silicon. Build with `bash macos/build.sh` on a Mac to produce a universal `.app` and ZIP. The Mac implementation has been added from a Windows development environment; native compilation, tests, and visual QA still need to pass on a Mac before a release is advertised. The [macOS CI workflow](.github/workflows/macos.yml) performs those build/test steps and saves a synthetic preview. The remaining commands and platform details on this page describe the Windows version.
 
 Licensed under the [MIT License](LICENSE).
 
