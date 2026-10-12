@@ -1,0 +1,17 @@
+Dolly Paste for macOS
+
+Requires macOS 13 Ventura or later. Supports Apple silicon and Intel Macs.
+
+1. Drag Dolly Paste to the Applications folder beside it.
+2. Eject the Dolly Paste disk image.
+3. Open Dolly Paste from Applications.
+
+Look for the sheep icon in the menu bar. Press Command-Shift-V to open your
+clipboard history. Copy an item, return to your destination, and press
+Command-V to paste it.
+
+If macOS asks, allow Dolly Paste to read the clipboard so it can save new clips.
+The app runs in the menu bar; no Dock icon is shown.
+
+To update, quit Dolly Paste using its menu-bar menu before replacing the app
+in Applications. To uninstall, quit it and move the app to the Trash.

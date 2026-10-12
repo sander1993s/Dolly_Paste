@@ -1,0 +1,49 @@
+name: macOS build and tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Core and platform tests
+        run: bash macos/test.sh
+      - name: Build universal application
+        run: bash macos/build.sh
+      - name: Package drag-to-Applications installer
+        run: bash macos/package.sh
+      - name: Render synthetic preview without clipboard access
+        run: |
+          "dist/macos/Dolly Paste.app/Contents/MacOS/DollyPaste" --preview "$RUNNER_TEMP/dolly-macos-preview.png"
+          test -s "$RUNNER_TEMP/dolly-macos-preview.png"
+          sips -g pixelWidth -g pixelHeight "$RUNNER_TEMP/dolly-macos-preview.png"
+      - name: Upload app and preview for review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Dolly-Paste-macOS
+          path: |
+            dist/macos/Dolly-Paste-macOS.zip
+            dist/macos/Dolly-Paste-macOS.dmg
+            dist/macos/SHA256SUMS.txt
+            ${{ runner.temp }}/dolly-macos-preview.png
+          if-no-files-found: error
+
+  portable-core:
+    runs-on: ubuntu-latest
+    container: swift:5.9-jammy
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: bash macos/test.sh

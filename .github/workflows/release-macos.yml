@@ -1,0 +1,94 @@
+name: Publish macOS installer
+
+on:
+  push:
+    tags:
+      - 'macos-v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'sander1993s/Dolly_Paste'
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate release version
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' macos/Info.plist)"
+          if [[ ! "$GITHUB_REF_NAME" =~ ^macos-v([0-9]+\.[0-9]+\.[0-9]+)(-beta\.[0-9]+)?$ ]] || [[ "${BASH_REMATCH[1]}" != "$version" ]]; then
+            echo 'The release tag must match the app version: macos-vX.Y.Z or macos-vX.Y.Z-beta.N.' >&2
+            exit 1
+          fi
+      - name: Run history, platform, and native UI tests
+        run: bash macos/test.sh
+      - name: Build universal app
+        run: bash macos/build.sh
+      - name: Package and verify installer
+        run: bash macos/package.sh
+      - name: Render synthetic preview
+        run: |
+          "dist/macos/Dolly Paste.app/Contents/MacOS/DollyPaste" --preview "$RUNNER_TEMP/dolly-macos-preview.png"
+          test -s "$RUNNER_TEMP/dolly-macos-preview.png"
+      - name: Retain verified release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-release
+          path: |
+            dist/macos/Dolly-Paste-macOS.dmg
+            dist/macos/Dolly-Paste-macOS.zip
+            dist/macos/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: macos-release
+          path: release
+      - name: Verify download bytes
+        working-directory: release
+        run: sha256sum --check SHA256SUMS.txt
+      - name: Publish installable Mac preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo 'This release already exists. Use a new version instead of replacing published downloads.' >&2
+            exit 1
+          fi
+          cat > release-notes.md <<'NOTES'
+          ## Install Dolly Paste for Mac
+
+          1. Download **Dolly-Paste-macOS.dmg** below.
+          2. Open the disk image and drag **Dolly Paste** into **Applications**.
+          3. Eject the disk image and open Dolly Paste from Applications.
+
+          **macOS 13 or later · Apple silicon and Intel · No Terminal or build tools needed.**
+
+          **Signing status:** This preview is not Developer ID signed or notarized by Apple. macOS may block the first launch. If you trust this download, follow [Apple's instructions](https://support.apple.com/102445) to use **System Settings → Privacy & Security → Open Anyway** after trying to launch it. Managed Macs may not allow that exception. Do not disable Gatekeeper globally.
+
+          Use the sheep menu-bar icon or **⌘⇧V** to open history. Text, images, image text recognition, pins, filtering, and optional encrypted local history are included. macOS may ask for clipboard access. History is in memory by default.
+
+          The ZIP is an alternative download containing the same app. SHA256SUMS.txt contains checksums for both downloads. This is a preview release: native automated tests pass before publication, but broader real-world Mac testing is still needed.
+          NOTES
+          printf '\nSource commit: `%s`\n' "$GITHUB_SHA" >> release-notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --prerelease \
+            --title "Dolly Paste for macOS ${GITHUB_REF_NAME#macos-v} (preview)" --notes-file release-notes.md
+          gh release upload "$GITHUB_REF_NAME" release/Dolly-Paste-macOS.dmg \
+            release/Dolly-Paste-macOS.zip release/SHA256SUMS.txt
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest=false
